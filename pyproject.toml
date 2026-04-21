@@ -1,0 +1,28 @@
+[project]
+name = "kaworai-watcher"
+version = "0.1.0"
+description = "Telegram userbot + control bot that watches channels and auto-appends matched episodes to the Kaworai anime bot DB."
+requires-python = ">=3.11"
+
+[tool.ruff]
+line-length = 110
+target-version = "py311"
+exclude = ["migrations", ".venv"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP", "SIM", "N", "RUF"]
+ignore = ["E501", "B008", "RUF001", "RUF002", "RUF003", "RUF012"]
+
+[tool.ruff.format]
+quote-style = "double"
+
+[tool.mypy]
+python_version = "3.11"
+ignore_missing_imports = true
+warn_unused_ignores = false
+check_untyped_defs = true
+exclude = ["migrations", ".venv"]
+
+[[tool.mypy.overrides]]
+module = "telethon.*"
+ignore_missing_imports = true
