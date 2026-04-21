@@ -18,10 +18,6 @@ class Settings(BaseSettings):
     CONTROL_BOT_TOKEN: str
     OWNER_ID: int
 
-    # Ingest kanal — userbot video'ni shu yerga forward qiladi.
-    # Control bot ushbu kanalda admin bo'lishi shart.
-    INGEST_CHANNEL_ID: int
-
     # Kaworai bilan umumiy DB
     DB_URL: str
 

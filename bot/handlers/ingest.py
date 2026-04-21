@@ -1,8 +1,8 @@
-"""Ingest kanal handleri.
+"""Ingest handler — control bot private chatda OWNER dan video oladi.
 
-Userbot video'ni ingest kanalga JSON caption bilan forward qiladi. Control bot
-shu kanal uchun admin bo'lgani uchun uning `channel_post`ini oladi, caption'dan
-metadata'ni parse qilib bot-API file_id ni `series` ga yozadi.
+Userbot moslik topilgan videoni control botga private chat orqali yuboradi
+(userbot = sizning akauntingiz). Control bot private message'ni qabul qiladi,
+caption'dan metadata'ni parse qilib bot-API file_id ni `series` ga yozadi.
 
 Caption format: `KWR_INGEST {"v":1,"anime_id":...,"episode":...,
 "file_unique_id":"...","source_channel_id":...}`
@@ -39,20 +39,25 @@ def _payload_from_caption(caption: str | None) -> dict | None:
     return data
 
 
-@router.channel_post(F.chat.id == settings.INGEST_CHANNEL_ID, F.video)
-async def on_video_post(message: Message) -> None:
-    await _handle_video(message)
+# Faqat OWNER dan kelgan private xabarlar
+_OWNER_PRIVATE = (
+    (F.chat.type == "private") & (F.from_user.id == settings.OWNER_ID) & F.caption.startswith(_CAPTION_PREFIX)
+)
 
 
-@router.channel_post(F.chat.id == settings.INGEST_CHANNEL_ID, F.document)
-async def on_doc_post(message: Message) -> None:
-    # Ba'zi video fayllar document sifatida yuborilishi mumkin
+@router.message(_OWNER_PRIVATE, F.video)
+async def on_video(message: Message) -> None:
+    await _handle(message)
+
+
+@router.message(_OWNER_PRIVATE, F.document)
+async def on_document(message: Message) -> None:
     if message.document and not (message.document.mime_type or "").startswith("video/"):
         return
-    await _handle_video(message)
+    await _handle(message)
 
 
-async def _handle_video(message: Message) -> None:
+async def _handle(message: Message) -> None:
     payload = _payload_from_caption(message.caption)
     if payload is None:
         return
@@ -71,7 +76,6 @@ async def _handle_video(message: Message) -> None:
     bot_file_id = media.file_id
 
     async with AsyncSessionLocal() as session:
-        # Agar (anime_id, episode) allaqachon bor bo'lsa — dubl qo'shmaymiz.
         existing = await get_series(session, anime_id, episode)
         if existing is not None:
             await mark_processed(

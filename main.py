@@ -15,6 +15,7 @@ from bot.handlers import ingest as ingest_handlers
 from config import settings
 from userbot.client import build_client
 from userbot.handlers import register as register_userbot_handlers
+from userbot.handlers import set_bot_username
 
 
 def _setup_logging() -> None:
@@ -33,6 +34,13 @@ async def _run() -> None:
     await userbot.start()  # StringSession yoki mavjud fayl asosidagi sessiya
     me = await userbot.get_me()
     log.info("Userbot ready: @%s (id=%s)", me.username, me.id)
+
+    # Control bot username — userbot moslik topilganda videoni shu yerga yuboradi
+    bot_me = await bot.get_me()
+    if not bot_me.username:
+        raise RuntimeError("Control botda username yo'q — @BotFather orqali belgilang")
+    set_bot_username(bot_me.username)
+    log.info("Control bot ready: @%s (id=%s)", bot_me.username, bot_me.id)
 
     # Routerlar — bir marta
     dp.include_router(admin_handlers.router)

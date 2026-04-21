@@ -5,9 +5,13 @@ Yangi xabar kelganda:
 2. Xabarda video/document bo'lsa (minimal davomiylikdan katta),
 3. file_unique_id allaqachon ro'yxatga olingan yoki series da mavjud bo'lsa — skip,
 4. Caption/fayl nomidan qism raqamini olish. Topilmasa — max(episode)+1.
-5. Xabarni ingest kanalga JSON-caption bilan forward qilish.
-   Control bot ingest kanalni kuzatib, forward kelganda bot-level file_id ni
-   olib DB ga (series) yozadi.
+5. Userbot videoni control bot bilan private chatga **o'zidan** yuboradi,
+   JSON-metadata caption bilan. Control bot uni qabul qilib `series` jadvaliga
+   yozadi.
+
+Muhim: control bot hech qayerda admin emas. U faqat sizning xabaringizni
+private chat'da qabul qiladi (userbot esa xuddi siz yuborganday yuboradi,
+chunki userbot — sizning akauntingiz).
 """
 
 from __future__ import annotations
@@ -37,6 +41,15 @@ from userbot.matcher import parse_meta
 
 log = logging.getLogger(__name__)
 
+# main.py by startup vaqti bot username ni shu yerga qo'yadi
+_bot_username: str | None = None
+
+
+def set_bot_username(username: str) -> None:
+    global _bot_username
+    _bot_username = username
+    log.info("Userbot → control bot delivery target: @%s", username)
+
 
 def _extract_video_meta(message: object) -> tuple[str | None, int, str | None]:
     """Return (file_unique_id, duration, filename) yoki (None, 0, None)."""
@@ -44,7 +57,6 @@ def _extract_video_meta(message: object) -> tuple[str | None, int, str | None]:
     if not isinstance(media, MessageMediaDocument) or media.document is None:
         return None, 0, None
     doc = media.document
-    # Fayl turi
     is_video = False
     duration = 0
     filename: str | None = None
@@ -56,7 +68,6 @@ def _extract_video_meta(message: object) -> tuple[str | None, int, str | None]:
             filename = attr.file_name
     if not is_video and not (doc.mime_type or "").startswith("video/"):
         return None, 0, None
-    # Telethon'da file_unique_id Message.file.unique_id orqali olinadi
     file = getattr(message, "file", None)
     unique_id: str | None = getattr(file, "unique_id", None) if file else None
     return unique_id, duration, filename
@@ -65,7 +76,6 @@ def _extract_video_meta(message: object) -> tuple[str | None, int, str | None]:
 async def _choose_episode_number(session, anime_id: int, parsed_episode: int | None) -> int:
     if parsed_episode is not None:
         return parsed_episode
-    # Fallback: oxirgi + 1
     last = await max_episode(session, anime_id)
     return last + 1
 
@@ -73,7 +83,6 @@ async def _choose_episode_number(session, anime_id: int, parsed_episode: int | N
 async def _resolve_anime_id(
     session, links: list, caption_title: str | None, enable_name_fallback: bool
 ) -> int | None:
-    """Agar kanal bitta animega bog'langan bo'lsa shunisi. Aks holda nomi bo'yicha."""
     if len(links) == 1:
         return links[0].anime_id
     if not enable_name_fallback or not caption_title:
@@ -81,7 +90,6 @@ async def _resolve_anime_id(
     anime = await find_anime_by_title(session, caption_title)
     if anime is None:
         return None
-    # Mos keladiganlar ichida nomi mos keladigani borligini tekshirish
     for link in links:
         if link.anime_id == anime.id:
             return anime.id
@@ -90,12 +98,11 @@ async def _resolve_anime_id(
 
 async def _handle_new_message(event: events.NewMessage.Event) -> None:
     message = event.message
-    # Faqat kanallardan
     peer_id = getattr(event.chat, "id", None)
     if peer_id is None:
         return
+
     # Telethon Channel.id pozitiv, lekin DB da -100… ko'rinishida saqlanadi.
-    # Ikkala formatda tekshirib ko'ramiz.
     candidates = [peer_id]
     if peer_id > 0:
         candidates.append(int(f"-100{peer_id}"))
@@ -122,7 +129,6 @@ async def _handle_new_message(event: events.NewMessage.Event) -> None:
             log.info("Skip (qisqa video duration=%ss) uid=%s", duration, unique_id)
             return
 
-        # Dedup: allaqachon qayta ishlangan yoki series da mavjud
         if await is_processed(session, unique_id):
             log.info("Skip (allaqachon processed) uid=%s", unique_id)
             return
@@ -153,7 +159,6 @@ async def _handle_new_message(event: events.NewMessage.Event) -> None:
 
         episode = await _choose_episode_number(session, anime_id, meta.episode)
 
-        # (anime_id, episode) bor bo'lsa — skip (lekin processed deb belgilaymiz)
         dup = await get_series(session, anime_id, episode)
         if dup is not None:
             await mark_processed(
@@ -168,7 +173,10 @@ async def _handle_new_message(event: events.NewMessage.Event) -> None:
             log.info("Skip (anime=%s ep=%s mavjud) uid=%s", anime_id, episode, unique_id)
             return
 
-    # Ingest kanalga forward — control bot qabul qiladi va DB ga yozadi
+    if _bot_username is None:
+        log.error("Skip: _bot_username hali aniqlanmagan (main.py set_bot_username qilmaganga o'xshaydi)")
+        return
+
     payload = {
         "v": 1,
         "anime_id": anime_id,
@@ -179,13 +187,18 @@ async def _handle_new_message(event: events.NewMessage.Event) -> None:
     caption = "KWR_INGEST " + json.dumps(payload, ensure_ascii=False)
     try:
         await event.client.send_file(
-            settings.INGEST_CHANNEL_ID,
+            _bot_username,
             file=message.media,
             caption=caption,
         )
-        log.info("Forward qilindi: anime=%s ep=%s uid=%s", anime_id, episode, unique_id)
+        log.info(
+            "Control botga yuborildi: anime=%s ep=%s uid=%s",
+            anime_id,
+            episode,
+            unique_id,
+        )
     except Exception:
-        log.exception("Ingest kanalga forward qilishda xato")
+        log.exception("Control botga yuborishda xato")
 
 
 def register(client: TelegramClient) -> None:
