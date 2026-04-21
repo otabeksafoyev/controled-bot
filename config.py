@@ -18,12 +18,15 @@ class Settings(BaseSettings):
     CONTROL_BOT_TOKEN: str
     OWNER_ID: int
 
-    # Kaworai bilan umumiy DB
-    DB_URL: str
+    # Kaworai_bot SECRET_CHANNEL_ID — shu yerga video yuboriladi "ID: X\nQism: Y"
+    # formatida. Kaworai_bot o'zining mavjud handleri bilan DB-ga yozadi.
+    SECRET_CHANNEL_ID: int
+
+    # Watcher o'z state'ini saqlaydigan SQLite fayli (kanal→anime map, dedup)
+    SQLITE_PATH: str = "watcher.db"
 
     # Parser
     MIN_VIDEO_DURATION: int = 60
-    ENABLE_NAME_FALLBACK: bool = True
 
     LOG_LEVEL: str = Field(default="INFO")
 

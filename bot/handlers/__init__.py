@@ -1,1 +1,1 @@
-from bot.handlers import admin, ingest  # noqa: F401
+from bot.handlers import admin  # noqa: F401

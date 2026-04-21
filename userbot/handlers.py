@@ -3,20 +3,19 @@
 Yangi xabar kelganda:
 1. Manbaning kanal IDsi watcher_channel_links da bog'langan bo'lsa,
 2. Xabarda video/document bo'lsa (minimal davomiylikdan katta),
-3. file_unique_id allaqachon ro'yxatga olingan yoki series da mavjud bo'lsa — skip,
-4. Caption/fayl nomidan qism raqamini olish. Topilmasa — max(episode)+1.
-5. Userbot videoni control bot bilan private chatga **o'zidan** yuboradi,
-   JSON-metadata caption bilan. Control bot uni qabul qilib `series` jadvaliga
-   yozadi.
+3. file_unique_id allaqachon yuborilgan bo'lmasa,
+4. Caption/fayl nomidan qism raqamini olish. Topilmasa — 1.
+5. Userbot videoni kaworai_bot SECRET_CHANNEL ga post qiladi,
+   "ID: <anime_id>\\nQism: <episode>" formatli caption bilan.
+6. Kaworai_bot o'zining mavjud `add_episode_from_channel` handleri bilan
+   DB-ga yozadi va bildirishnoma yuboradi.
 
-Muhim: control bot hech qayerda admin emas. U faqat sizning xabaringizni
-private chat'da qabul qiladi (userbot esa xuddi siz yuborganday yuboradi,
-chunki userbot — sizning akauntingiz).
+Muhim: watcher kaworai DB-ga tegmaydi. Hamma narsa kaworai_bot'ning
+o'z ishlash mantig'i orqali bajariladi.
 """
 
 from __future__ import annotations
 
-import json
 import logging
 
 from telethon import TelegramClient, events
@@ -29,26 +28,13 @@ from telethon.tl.types import (
 from config import settings
 from db.engine import AsyncSessionLocal
 from db.queries import (
-    find_anime_by_title,
     get_links_for_channel,
-    get_series,
-    get_series_by_unique_id,
-    is_processed,
-    mark_processed,
-    max_episode,
+    is_forwarded,
+    mark_forwarded,
 )
 from userbot.matcher import parse_meta
 
 log = logging.getLogger(__name__)
-
-# main.py by startup vaqti bot username ni shu yerga qo'yadi
-_bot_username: str | None = None
-
-
-def set_bot_username(username: str) -> None:
-    global _bot_username
-    _bot_username = username
-    log.info("Userbot → control bot delivery target: @%s", username)
 
 
 def _extract_video_meta(message: object) -> tuple[str | None, int, str | None]:
@@ -71,29 +57,6 @@ def _extract_video_meta(message: object) -> tuple[str | None, int, str | None]:
     file = getattr(message, "file", None)
     unique_id: str | None = getattr(file, "unique_id", None) if file else None
     return unique_id, duration, filename
-
-
-async def _choose_episode_number(session, anime_id: int, parsed_episode: int | None) -> int:
-    if parsed_episode is not None:
-        return parsed_episode
-    last = await max_episode(session, anime_id)
-    return last + 1
-
-
-async def _resolve_anime_id(
-    session, links: list, caption_title: str | None, enable_name_fallback: bool
-) -> int | None:
-    if len(links) == 1:
-        return links[0].anime_id
-    if not enable_name_fallback or not caption_title:
-        return None
-    anime = await find_anime_by_title(session, caption_title)
-    if anime is None:
-        return None
-    for link in links:
-        if link.anime_id == anime.id:
-            return anime.id
-    return None
 
 
 async def _handle_new_message(event: events.NewMessage.Event) -> None:
@@ -129,76 +92,53 @@ async def _handle_new_message(event: events.NewMessage.Event) -> None:
             log.info("Skip (qisqa video duration=%ss) uid=%s", duration, unique_id)
             return
 
-        if await is_processed(session, unique_id):
-            log.info("Skip (allaqachon processed) uid=%s", unique_id)
+        if await is_forwarded(session, unique_id):
+            log.info("Skip (allaqachon yuborilgan) uid=%s", unique_id)
             return
-        existing = await get_series_by_unique_id(session, unique_id)
-        if existing is not None:
-            await mark_processed(
-                session,
-                file_unique_id=unique_id,
-                anime_id=existing.anime_id,
-                episode=existing.episode,
-                series_id=existing.id,
-                source_channel_id=matched_channel_id,
-            )
-            await session.commit()
-            log.info("Skip (series da mavjud) uid=%s", unique_id)
-            return
+
+        # Bir kanal bir nechta animega bog'langan bo'lsa, hozirgi turg'un
+        # versiya faqat bitta bog'lanishni qo'llab-quvvatlaydi. Birinchisini
+        # tanlaymiz — boshqa strategiya kerak bo'lsa /unlink orqali tozalang.
+        anime_id = links[0].anime_id
 
         text_source = message.message or filename or ""
         meta = parse_meta(text_source)
-        anime_id = await _resolve_anime_id(session, links, meta.title, settings.ENABLE_NAME_FALLBACK)
-        if anime_id is None:
-            log.info(
-                "Skip: kanal %s bir nechta animega bog'langan, mos anime aniqlanmadi (title=%r)",
-                matched_channel_id,
-                meta.title,
-            )
-            return
+        episode = meta.episode if meta.episode is not None else 1
 
-        episode = await _choose_episode_number(session, anime_id, meta.episode)
-
-        dup = await get_series(session, anime_id, episode)
-        if dup is not None:
-            await mark_processed(
-                session,
-                file_unique_id=unique_id,
-                anime_id=anime_id,
-                episode=episode,
-                series_id=dup.id,
-                source_channel_id=matched_channel_id,
-            )
-            await session.commit()
-            log.info("Skip (anime=%s ep=%s mavjud) uid=%s", anime_id, episode, unique_id)
-            return
-
-    if _bot_username is None:
-        log.error("Skip: _bot_username hali aniqlanmagan (main.py set_bot_username qilmaganga o'xshaydi)")
-        return
-
-    payload = {
-        "v": 1,
-        "anime_id": anime_id,
-        "episode": episode,
-        "file_unique_id": unique_id,
-        "source_channel_id": matched_channel_id,
-    }
-    caption = "KWR_INGEST " + json.dumps(payload, ensure_ascii=False)
+    # Kaworai SECRET_CHANNEL ga post — kaworai_bot handleri uni qabul qiladi
+    caption = f"ID: {anime_id}\nQism: {episode}"
     try:
         await event.client.send_file(
-            _bot_username,
+            settings.SECRET_CHANNEL_ID,
             file=message.media,
             caption=caption,
         )
-        log.info(
-            "Control botga yuborildi: anime=%s ep=%s uid=%s",
+    except Exception:
+        log.exception(
+            "SECRET_CHANNEL ga yuborishda xato (anime=%s ep=%s uid=%s) — "
+            "siz bu kanalda post qila olishingizga ishonch hosil qiling",
             anime_id,
             episode,
             unique_id,
         )
-    except Exception:
-        log.exception("Control botga yuborishda xato")
+        return
+
+    async with AsyncSessionLocal() as session:
+        await mark_forwarded(
+            session,
+            file_unique_id=unique_id,
+            anime_id=anime_id,
+            episode=episode,
+            source_channel_id=matched_channel_id,
+        )
+        await session.commit()
+
+    log.info(
+        "Kaworai SECRET_CHANNEL ga yuborildi: anime=%s ep=%s uid=%s",
+        anime_id,
+        episode,
+        unique_id,
+    )
 
 
 def register(client: TelegramClient) -> None:

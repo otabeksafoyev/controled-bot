@@ -9,6 +9,7 @@ Komandalar:
 /link <kanal> <anime_id>   — kanalni animega bog'laydi
 /unlink <kanal> [<anime_id>] — bog'lanishni o'chirish
 /resolve <kanal>           — kanal IDsini olish
+/forwarded                 — so'nggi yuborilgan fayllar
 """
 
 from __future__ import annotations
@@ -36,10 +37,10 @@ from telethon.tl.types import Channel
 from config import settings
 from db.engine import AsyncSessionLocal
 from db.queries import (
-    add_channel_link,
-    get_anime,
+    add_link,
     list_all_links,
-    remove_channel_link,
+    recent_forwarded,
+    remove_link,
 )
 
 log = logging.getLogger(__name__)
@@ -59,14 +60,17 @@ async def cmd_start(message: Message) -> None:
         return
     await message.answer(
         "<b>Kaworai Watcher</b>\n\n"
+        "Userbot obuna bo'lgan kanallaringizdan yangi video olib, "
+        "kaworai_bot SECRET_CHANNEL ga avtomatik post qiladi.\n\n"
         "Komandalar:\n"
         "/status — holat\n"
         "/channels — bog'langan kanallar\n"
         "/subscribe &lt;@username yoki invite link&gt;\n"
         "/unsubscribe &lt;@username yoki id&gt;\n"
+        "/resolve &lt;kanal&gt; — ID olish\n"
         "/link &lt;kanal&gt; &lt;anime_id&gt;\n"
         "/unlink &lt;kanal&gt; [&lt;anime_id&gt;]\n"
-        "/resolve &lt;kanal&gt; — ID olish"
+        "/forwarded — so'nggi yuborilganlar"
     )
 
 
@@ -81,14 +85,20 @@ async def cmd_status(message: Message, userbot: TelegramClient) -> None:
         user_line = f"Userbot: XATO — {exc}"
     async with AsyncSessionLocal() as session:
         links = await list_all_links(session)
-    await message.answer(f"{user_line}\nBog'lanishlar: {len(links)}")
+        recent = await recent_forwarded(session, limit=5)
+    lines = [
+        user_line,
+        f"Bog'lanishlar: {len(links)}",
+        f"SECRET_CHANNEL: <code>{settings.SECRET_CHANNEL_ID}</code>",
+        f"So'nggi yuborilgan: {len(recent)}",
+    ]
+    await message.answer("\n".join(lines))
 
 
 async def _resolve_channel(userbot: TelegramClient, raw: str) -> Channel | None:
     raw = raw.strip()
-    # Invite link
     if "t.me/+" in raw or "t.me/joinchat/" in raw:
-        return None  # importga alohida qaralsin
+        return None
     try:
         entity = await userbot.get_entity(raw)
     except (UsernameNotOccupiedError, ValueError):
@@ -99,7 +109,6 @@ async def _resolve_channel(userbot: TelegramClient, raw: str) -> Channel | None:
 
 
 def _channel_id_to_db(channel_id: int) -> int:
-    """Kanallar uchun -100<id> formatiga keltirish."""
     if channel_id < 0:
         return channel_id
     return int(f"-100{channel_id}")
@@ -132,7 +141,6 @@ async def cmd_subscribe(message: Message, userbot: TelegramClient, command: Any)
     arg = command.args.strip()
     try:
         if "t.me/+" in arg or "/joinchat/" in arg:
-            # Invite hash ajratish
             hash_part = arg.rsplit("+", 1)[-1] if "t.me/+" in arg else arg.rsplit("/", 1)[-1]
             with contextlib.suppress(UserAlreadyParticipantError):
                 await userbot(ImportChatInviteRequest(hash_part))
@@ -169,7 +177,6 @@ async def cmd_unsubscribe(message: Message, userbot: TelegramClient, command: An
 
 
 def _parse_channel_arg(value: str) -> int | str:
-    """Raqam bo'lsa int, aks holda @username kabi string qaytaradi."""
     value = value.strip()
     try:
         return int(value)
@@ -208,20 +215,18 @@ async def cmd_link(message: Message, userbot: TelegramClient, command: Any) -> N
             title = getattr(entity, "title", None)
 
     async with AsyncSessionLocal() as session:
-        anime = await get_anime(session, anime_id)
-        if anime is None:
-            await message.answer(f"Anime topilmadi (id={anime_id}).")
-            return
-        await add_channel_link(
+        link = await add_link(
             session,
             channel_id=channel_id,
             anime_id=anime_id,
-            channel_title=title,
             created_by=message.from_user.id if message.from_user else 0,
         )
         await session.commit()
+    if link is None:
+        await message.answer("Bu bog'lanish allaqachon mavjud.")
+        return
     await message.answer(
-        f"Bog'landi: kanal <code>{channel_id}</code> → anime #{anime_id} " f"(<b>{anime.title}</b>)"
+        f"Bog'landi: kanal <code>{channel_id}</code> → anime #{anime_id}" + (f" ({title})" if title else "")
     )
 
 
@@ -240,7 +245,7 @@ async def cmd_unlink(message: Message, command: Any) -> None:
         return
     anime_id = int(parts[1]) if len(parts) > 1 else None
     async with AsyncSessionLocal() as session:
-        removed = await remove_channel_link(session, channel_id=channel_id, anime_id=anime_id)
+        removed = await remove_link(session, channel_id=channel_id, anime_id=anime_id)
         await session.commit()
     await message.answer(f"O'chirildi: {removed} bog'lanish.")
 
@@ -254,8 +259,21 @@ async def cmd_channels(message: Message) -> None:
     if not links:
         await message.answer("Bog'lanishlar yo'q.")
         return
+    lines = [f"• <code>{link.channel_id}</code> → anime #{link.anime_id}" for link in links]
+    await message.answer("\n".join(lines))
+
+
+@router.message(Command("forwarded"))
+async def cmd_forwarded(message: Message) -> None:
+    if not owner_only(message):
+        return
+    async with AsyncSessionLocal() as session:
+        rows = await recent_forwarded(session, limit=20)
+    if not rows:
+        await message.answer("Hali hech narsa yuborilmagan.")
+        return
     lines = [
-        f"• <code>{link.channel_id}</code> → #{link.anime_id} " f"({link.channel_title or '—'})"
-        for link in links
+        f"#{row.id} anime={row.anime_id} ep={row.episode} uid=<code>{row.file_unique_id}</code>"
+        for row in rows
     ]
     await message.answer("\n".join(lines))

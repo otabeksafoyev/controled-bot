@@ -1,132 +1,107 @@
-# Kaworai Watcher
+# Kaworai Controled Bot
 
-Sizning shaxsiy Telegram akauntingiz orqali kanallarni kuzatib, yangi video
-postlarni **Kaworai anime bot** ma'lumotlar bazasiga avtomatik qism sifatida
-qo'shadi.
+Telegram userbot + control bot. **Sizning shaxsiy akauntingiz orqali** kanallarni
+kuzatadi va topilgan videolarni to'g'ri formatda `kaworai_bot`'ning **SECRET_CHANNEL**
+iga post qiladi. Kaworai_bot o'zining mavjud handleri bilan qismni DB ga qo'shib qo'yadi.
 
-**Bot hech qayerda admin emas.** U sizning akauntingizga ulangan 2-foydalanuvchi
-kabi ishlaydi va faqat siz bilan private chatda aloqa qiladi.
-
-## Qanday ishlaydi
-
-1. **Userbot (Telethon)** — sizning akauntingiz bilan ulanadi. Siz obuna
-   bo'lgan kanallardagi yangi postlarni kuzatadi.
-2. Yangi video post kelsa va kanal `/link` orqali aniq anime-ga bog'langan
-   bo'lsa, userbot videoni **control bot bilan private chatga** yuboradi
-   (JSON-metadata caption bilan). Userbot = sizning akauntingiz, shuning
-   uchun bot bu xabarni xuddi siz shaxsan yuborganday ko'radi.
-3. **Control bot (aiogram)** private xabarni qabul qiladi, bot-API `file_id`
-   ni oladi va `series` jadvaliga yangi qism qilib yozadi.
-4. Dublikat bo'lmasligi uchun `file_unique_id` bo'yicha dedup qilinadi.
-
-### Nega shunday?
-
-Userbot (MTProto) va bot (Bot API) `file_id`lari o'zaro mos kelmaydi. Kaworai
-bot foydalanuvchilarga video yuborishi uchun **bot-API file_id** kerak.
-Shuning uchun userbot videoni bot bilan private chatga jo'natadi → bot o'zining
-`file_id` sini oladi va DB-ga yozadi.
-
-## O'rnatish
-
-```bash
-pip install -r requirements.txt
-cp .env.example .env
-# .env ni to'ldiring (quyiga qarang)
-```
-
-### .env
-
-| Key | Ma'no |
-| --- | --- |
-| `TELEGRAM_API_ID`, `TELEGRAM_API_HASH` | https://my.telegram.org/apps dan |
-| `TELEGRAM_STRING_SESSION` | `python scripts/create_session.py` chiqargan qator |
-| `CONTROL_BOT_TOKEN` | @BotFather dan yangi bot |
-| `OWNER_ID` | Sizning Telegram ID (faqat siz komandalar chaqira olasiz) |
-| `DB_URL` | Kaworai bilan bir xil Postgres URL |
-
-### StringSession yaratish
-
-```bash
-python scripts/create_session.py
-```
-
-Telefon raqam va kodni kiritgandan keyin bitta qator chiqadi — uni `.env` ga
-`TELEGRAM_STRING_SESSION=...` shaklida joylashtiring.
-
-### Control botni ishga tayyorlash
-
-1. @BotFather orqali yangi bot yarating; tokenni `.env` ga yozing.
-2. O'z akauntingiz bilan shu botni ochib, **bir marta `/start`** bosing. Bu
-   userbot-ga botga xabar yubora olish imkonini beradi.
-
-### DB migration
-
-Kaworai_bot DB-ga quyidagini bir marta ishlating:
-
-```bash
-psql "$DB_URL" -f migrations/001_initial.sql
-```
-
-Bu:
-- `series.file_unique_id` ustunini qo'shadi (eski qatorlar NULL qoladi)
-- `watcher_channel_links` va `watcher_processed_files` jadvallarini yaratadi
-
-### Ishga tushirish
-
-```bash
-python main.py
-```
-
-yoki Docker bilan:
-
-```bash
-docker compose up -d --build
-```
-
-## Control bot komandalari
-
-Komandalar faqat `OWNER_ID` foydalanuvchi uchun, private chatda:
-
-| Komanda | Tavsif |
-| --- | --- |
-| `/start` | yordam |
-| `/status` | userbot + bog'lanishlar holati |
-| `/resolve <@username\|link>` | kanal IDsini aniqlash |
-| `/subscribe <@username\|invite link>` | userbot kanalga obuna bo'ladi |
-| `/unsubscribe <@username\|id>` | obunadan chiqish |
-| `/link <kanal> <anime_id>` | kanalni anime-ga bog'lash |
-| `/unlink <kanal_id> [<anime_id>]` | bog'lanishni o'chirish |
-| `/channels` | barcha bog'lanishlar |
-
-### Namuna ish oqimi
+## Tamoyil
 
 ```
-/resolve @my_anime_channel   → -1001234567890, "My Anime Channel"
-/subscribe @my_anime_channel
-/link -1001234567890 42       # kanal → anime #42
-/channels
+Kanallar ────(MTProto)───▶ Userbot (sizning akauntingiz)
+                                 │
+                    /link <kanal> <anime_id>
+                                 │
+                                 ▼
+              Userbot SECRET_CHANNEL ga post qiladi
+              caption: "ID: <anime_id>\nQism: <episode>"
+                                 │
+                                 ▼
+                kaworai_bot mavjud handleri ishlaydi
+                  va series jadvaliga qismni qo'shadi
 ```
 
-Endi o'sha kanalga yangi video post chiqqanda, u avtomatik Kaworai bot-da
-anime #42 ning keyingi qismi sifatida qo'shiladi.
+**Bot hech qayerda admin bo'lishi shart emas.** Kanalda video siz (userbot)
+tomonidan post qilinadi — SECRET_CHANNEL siz kaworai_bot uchun yaratgan
+kanalingiz bo'lgani uchun sizda u erga post qilish huquqi bor.
 
-## Moslashtirish mantig'i
+## Fayllar
 
-1. Kanal `watcher_channel_links` da bo'lishi kerak.
-2. Video davomiyligi `MIN_VIDEO_DURATION` dan katta (default 60s).
-3. `file_unique_id`:
-   - `watcher_processed_files` da bo'lsa → skip
-   - `series.file_unique_id` da bo'lsa → skip va processed deb belgilash
-4. Qism raqami: caption/fayl nomidan (`qism 5`, `Ep 05`, `S01E05`, ...).
-   Topilmasa → `max(episode)+1`.
-5. `(anime_id, episode)` allaqachon bor bo'lsa → skip.
-6. Aks holda userbot videoni control bot bilan private chatga yuboradi →
-   control bot DB ga yozadi.
+| Fayl | Vazifasi |
+|---|---|
+| `userbot/client.py`, `userbot/handlers.py` | Telethon — kanallarni kuzatish |
+| `userbot/matcher.py` | Caption/filename dan qism raqamini ajratib olish |
+| `bot/client.py`, `bot/handlers/admin.py` | Aiogram control bot — komandalar |
+| `db/models.py`, `db/queries.py` | Mahalliy SQLite (kanal→anime map + dedup) |
+| `config.py` | Sozlamalar (.env orqali) |
+| `main.py` | Userbot + control botni birga ishga tushiradi |
+| `scripts/create_session.py` | StringSession yaratuvchi (bir martalik) |
 
-## Xavfsizlik
+## Sozlash
 
-- `.env`, `*.session` git-ga tushmasligi kerak (`.gitignore` da).
-- Userbot sessiyasini hech kimga bermang — bu sizning akauntingiz.
-- Control bot faqat `OWNER_ID` dan kelgan xabarlarni qabul qiladi.
-- Agar bot tokeni oshkor bo'lsa — @BotFather `/revoke` orqali qayta generatsiya
-  qiling va `.env` ni yangilang.
+1. Repository clone qilib, requirements o'rnating:
+   ```bash
+   git clone https://github.com/otabeksafoyev/controled-bot
+   cd controled-bot
+   pip install -r requirements.txt
+   ```
+
+2. `.env` faylini yarating (`.env.example` dan ko'chiring) va to'ldiring:
+   - `TELEGRAM_API_ID`, `TELEGRAM_API_HASH` — https://my.telegram.org/apps
+   - `CONTROL_BOT_TOKEN` — @BotFather dan yangi bot
+   - `OWNER_ID` — sizning Telegram user IDingiz (@userinfobot)
+   - `SECRET_CHANNEL_ID` — kaworai_bot `.env` dan `SECRET_CHANNEL_ID` qiymati
+   - `TELEGRAM_STRING_SESSION` — keyingi qadamda
+
+3. StringSession yarating (bir marta):
+   ```bash
+   python scripts/create_session.py
+   ```
+   Telefon raqami va SMS kod so'raladi. Chiqqan stringni `.env` ga yozing.
+
+4. Ishga tushiring:
+   ```bash
+   python main.py
+   ```
+   Birinchi startda `watcher.db` (SQLite) avtomatik yaratiladi.
+
+## Foydalanish
+
+Control bot bilan private chatda (sizdan boshqa hech kim komanda yubora olmaydi):
+
+- `/start` — yordam
+- `/status` — userbot va konfiguratsiya holati
+- `/resolve @kanal` — kanal IDsini olish
+- `/subscribe @kanal` yoki `/subscribe <invite_link>` — userbot obuna bo'ladi
+- `/unsubscribe @kanal`
+- `/link <kanal_id> <anime_id>` — kanalni kaworai anime-ga bog'lash
+- `/unlink <kanal_id> [<anime_id>]`
+- `/channels` — barcha bog'lanishlar
+- `/forwarded` — so'nggi yuborilgan fayllar
+
+## Ish oqimi (misol)
+
+1. Kaworai admin panelda yangi anime qo'shdingiz — ID: 388
+2. Shu anime chiqib turadigan kanalni bilasiz: `@naruto_uploads`
+3. Control botga `/subscribe @naruto_uploads` — userbot obuna bo'ldi
+4. `/resolve @naruto_uploads` → ID olasiz (masalan `-1002345678901`)
+5. `/link -1002345678901 388` — bog'lash
+6. O'sha kanalga yangi video post qilinganda (caption: "qism 13"):
+   - Userbot file_unique_id bo'yicha dedup tekshiradi
+   - Qism raqamini caption dan ajratadi (13)
+   - Kaworai SECRET_CHANNEL ga post qiladi: caption `ID: 388\nQism: 13`
+   - kaworai_bot avtomatik series jadvaliga qo'shadi va sizga bildirishnoma yuboradi
+
+## Dedup
+
+Mahalliy SQLite `watcher_forwarded` jadvalida `file_unique_id` bo'yicha dedup
+qiladi. Qayta ishga tushirilsa ham tarix saqlanadi.
+
+## Muammo bartaraf etish
+
+- **"SECRET_CHANNEL ga yuborishda xato"** — siz o'sha kanalda post qila
+  olishingizga ishonch hosil qiling (kaworai uchun yaratgan kanal bo'lgani uchun
+  odatda admin hisoblanasiz).
+- **Userbot FloodWait** — Telegram rate limit. Telethon avtomatik kutadi.
+- **Qism raqami noto'g'ri aniqlanadi** — post caption-da `qism 13` yoki `ep 13`
+  kabi aniq format kerak. Topilmasa `1` ishlatiladi (keyin kaworai `last_ep+1`
+  qo'yadi).

@@ -1,24 +1,18 @@
-"""Async SQLAlchemy engine and session factory."""
+"""SQLAlchemy async engine — mahalliy SQLite (watcher uchun).
+
+Watcher kaworai DB-siga tegmaydi. U faqat o'z state'ini saqlaydi:
+- watcher_channel_links: kanal → anime_id mapping
+- watcher_forwarded: yuborilgan fayllar (dedup uchun)
+"""
 
 from __future__ import annotations
 
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
-from sqlalchemy.orm import DeclarativeBase
 
 from config import settings
 
+# aiosqlite URL — fayl nisbatan yo'l
+_url = f"sqlite+aiosqlite:///{settings.SQLITE_PATH}"
 
-class Base(DeclarativeBase):
-    pass
-
-
-engine = create_async_engine(settings.DB_URL, pool_pre_ping=True, future=True)
-
-AsyncSessionLocal: async_sessionmaker[AsyncSession] = async_sessionmaker(
-    bind=engine, expire_on_commit=False, autoflush=False, class_=AsyncSession
-)
-
-
-async def get_session() -> AsyncSession:
-    """Return a new AsyncSession. Caller is responsible for closing."""
-    return AsyncSessionLocal()
+engine = create_async_engine(_url, echo=False, future=True)
+AsyncSessionLocal = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)

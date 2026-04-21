@@ -11,11 +11,11 @@ from aiogram import Bot
 
 from bot.client import bot, dp
 from bot.handlers import admin as admin_handlers
-from bot.handlers import ingest as ingest_handlers
 from config import settings
+from db.engine import engine
+from db.models import Base
 from userbot.client import build_client
 from userbot.handlers import register as register_userbot_handlers
-from userbot.handlers import set_bot_username
 
 
 def _setup_logging() -> None:
@@ -25,26 +25,29 @@ def _setup_logging() -> None:
     )
 
 
+async def _init_db() -> None:
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+
+
 async def _run() -> None:
     _setup_logging()
     log = logging.getLogger("main")
 
+    await _init_db()
+    log.info("SQLite tayyor: %s", settings.SQLITE_PATH)
+
     userbot = build_client()
     register_userbot_handlers(userbot)
-    await userbot.start()  # StringSession yoki mavjud fayl asosidagi sessiya
+    await userbot.start()
     me = await userbot.get_me()
     log.info("Userbot ready: @%s (id=%s)", me.username, me.id)
 
-    # Control bot username — userbot moslik topilganda videoni shu yerga yuboradi
     bot_me = await bot.get_me()
-    if not bot_me.username:
-        raise RuntimeError("Control botda username yo'q — @BotFather orqali belgilang")
-    set_bot_username(bot_me.username)
     log.info("Control bot ready: @%s (id=%s)", bot_me.username, bot_me.id)
+    log.info("SECRET_CHANNEL_ID: %s", settings.SECRET_CHANNEL_ID)
 
-    # Routerlar — bir marta
     dp.include_router(admin_handlers.router)
-    dp.include_router(ingest_handlers.router)
 
     stop_event = asyncio.Event()
 
