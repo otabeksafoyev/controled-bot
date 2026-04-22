@@ -10,9 +10,12 @@ import signal
 from aiogram import Bot
 
 from bot.client import bot, dp
-from bot.handlers import admin as admin_handlers
+from bot.handlers import channels as channels_handlers
+from bot.handlers import menu as menu_handlers
+from bot.handlers import replies as replies_handlers
 from config import settings
 from db.engine import engine
+from db.migrations import migrate_legacy_channel_links
 from db.models import Base
 from userbot.client import build_client
 from userbot.handlers import register as register_userbot_handlers
@@ -28,6 +31,7 @@ def _setup_logging() -> None:
 async def _init_db() -> None:
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
+    await migrate_legacy_channel_links(engine)
 
 
 async def _run() -> None:
@@ -47,7 +51,9 @@ async def _run() -> None:
     log.info("Control bot ready: @%s (id=%s)", bot_me.username, bot_me.id)
     log.info("SECRET_CHANNEL_ID: %s", settings.SECRET_CHANNEL_ID)
 
-    dp.include_router(admin_handlers.router)
+    dp.include_router(menu_handlers.router)
+    dp.include_router(channels_handlers.router)
+    dp.include_router(replies_handlers.router)
 
     stop_event = asyncio.Event()
 
