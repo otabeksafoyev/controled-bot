@@ -1,17 +1,13 @@
 """Userbot event handlers.
 
 Yangi xabar kelganda:
-1. Manbaning kanal IDsi watcher_channel_links da bog'langan bo'lsa,
-2. Xabarda video/document bo'lsa (minimal davomiylikdan katta),
-3. file_unique_id allaqachon yuborilgan bo'lmasa,
-4. Caption/fayl nomidan qism raqamini olish. Topilmasa — 1.
-5. Userbot videoni kaworai_bot SECRET_CHANNEL ga post qiladi,
-   "ID: <anime_id>\\nQism: <episode>" formatli caption bilan.
-6. Kaworai_bot o'zining mavjud `add_episode_from_channel` handleri bilan
-   DB-ga yozadi va bildirishnoma yuboradi.
-
-Muhim: watcher kaworai DB-ga tegmaydi. Hamma narsa kaworai_bot'ning
-o'z ishlash mantig'i orqali bajariladi.
+1. Agar xabar **shaxsiy chat**da (kontakt) bo'lsa — avtojavob qoidalari tekshiriladi.
+2. Aks holda (kanal xabari) — `watcher_channel_rules` ichida mos qoida qidiriladi:
+   - Caption qoida pattern-iga mos kelsa, o'sha anime_id ga qism sifatida yuboriladi.
+   - Video bo'lmasa, mos qoida bo'lmasa yoki dublikat bo'lsa — o'tkazib yuboriladi.
+3. Mos qoida topilsa: watcher videoni kaworai SECRET_CHANNEL ga
+   "ID: <anime_id>\\nQism: <episode>" caption bilan post qiladi.
+4. Kaworai_bot o'zining `add_episode_from_channel` handleri bilan DB-ga yozadi.
 """
 
 from __future__ import annotations
@@ -23,16 +19,20 @@ from telethon.tl.types import (
     DocumentAttributeFilename,
     DocumentAttributeVideo,
     MessageMediaDocument,
+    PeerUser,
+    User,
 )
 
 from config import settings
 from db.engine import AsyncSessionLocal
 from db.queries import (
-    get_links_for_channel,
+    get_rules_for_channel,
     is_forwarded,
+    list_active_auto_replies,
     mark_forwarded,
 )
 from userbot.matcher import parse_meta
+from userbot.rules import match_pattern
 
 log = logging.getLogger(__name__)
 
@@ -59,7 +59,7 @@ def _extract_video_meta(message: object) -> tuple[str | None, int, str | None]:
     return unique_id, duration, filename
 
 
-async def _handle_new_message(event: events.NewMessage.Event) -> None:
+async def _handle_channel_message(event: events.NewMessage.Event) -> None:
     message = event.message
     peer_id = getattr(event.chat, "id", None)
     if peer_id is None:
@@ -75,14 +75,14 @@ async def _handle_new_message(event: events.NewMessage.Event) -> None:
             candidates.append(int(raw[3:]))
 
     async with AsyncSessionLocal() as session:
-        links: list = []
+        rules: list = []
         matched_channel_id = peer_id
         for cid in candidates:
-            links = await get_links_for_channel(session, cid)
-            if links:
+            rules = await get_rules_for_channel(session, cid)
+            if rules:
                 matched_channel_id = cid
                 break
-        if not links:
+        if not rules:
             return
 
         unique_id, duration, filename = _extract_video_meta(message)
@@ -91,32 +91,41 @@ async def _handle_new_message(event: events.NewMessage.Event) -> None:
         if duration and duration < settings.MIN_VIDEO_DURATION:
             log.info("Skip (qisqa video duration=%ss) uid=%s", duration, unique_id)
             return
-
         if await is_forwarded(session, unique_id):
             log.info("Skip (allaqachon yuborilgan) uid=%s", unique_id)
             return
 
-        # Bir kanal bir nechta animega bog'langan bo'lsa, hozirgi turg'un
-        # versiya faqat bitta bog'lanishni qo'llab-quvvatlaydi. Birinchisini
-        # tanlaymiz — boshqa strategiya kerak bo'lsa /unlink orqali tozalang.
-        anime_id = links[0].anime_id
+        # FAQAT caption ni tekshiramiz (user tanlovi).
+        caption_text = message.message or ""
+        selected = None
+        for rule in rules:
+            if match_pattern(caption_text, rule.pattern, rule.pattern_type):
+                selected = rule
+                break
+        if selected is None:
+            log.info(
+                "Skip (hech qaysi qoidaga mos kelmadi) channel=%s uid=%s caption=%r",
+                matched_channel_id,
+                unique_id,
+                caption_text[:80],
+            )
+            return
 
-        text_source = message.message or filename or ""
-        meta = parse_meta(text_source)
+        anime_id = selected.anime_id
+        # Qism raqami — captiondan (fallback filename bilan)
+        meta = parse_meta(caption_text or filename or "")
         episode = meta.episode if meta.episode is not None else 1
 
-    # Kaworai SECRET_CHANNEL ga post — kaworai_bot handleri uni qabul qiladi
-    caption = f"ID: {anime_id}\nQism: {episode}"
+    caption_out = f"ID: {anime_id}\nQism: {episode}"
     try:
         await event.client.send_file(
             settings.SECRET_CHANNEL_ID,
             file=message.media,
-            caption=caption,
+            caption=caption_out,
         )
     except Exception:
         log.exception(
-            "SECRET_CHANNEL ga yuborishda xato (anime=%s ep=%s uid=%s) — "
-            "siz bu kanalda post qila olishingizga ishonch hosil qiling",
+            "SECRET_CHANNEL ga yuborishda xato (anime=%s ep=%s uid=%s)",
             anime_id,
             episode,
             unique_id,
@@ -134,11 +143,49 @@ async def _handle_new_message(event: events.NewMessage.Event) -> None:
         await session.commit()
 
     log.info(
-        "Kaworai SECRET_CHANNEL ga yuborildi: anime=%s ep=%s uid=%s",
+        "Kaworai SECRET_CHANNEL ga yuborildi: anime=%s ep=%s uid=%s (qoida #%s pattern=%r)",
         anime_id,
         episode,
         unique_id,
+        selected.id,
+        selected.pattern,
     )
+
+
+async def _handle_private_message(event: events.NewMessage.Event) -> None:
+    """Kontaktdan kelgan shaxsiy xabarga avtojavob."""
+    sender = await event.get_sender()
+    if not isinstance(sender, User):
+        return
+    if sender.bot or sender.is_self:
+        return
+    # Faqat kontakt — Telegram User.contact flag
+    if not getattr(sender, "contact", False):
+        return
+
+    text = event.message.message or ""
+    if not text:
+        return
+
+    async with AsyncSessionLocal() as session:
+        replies = await list_active_auto_replies(session)
+
+    for reply in replies:
+        if match_pattern(text, reply.pattern, reply.pattern_type):
+            try:
+                await event.client.send_message(sender.id, reply.reply_text)
+            except Exception:
+                log.exception("Avtojavob yuborishda xato (sender=%s)", sender.id)
+            return
+
+
+async def _dispatch(event: events.NewMessage.Event) -> None:
+    # Shaxsiy chat (PeerUser) — avtojavob
+    if isinstance(event.message.peer_id, PeerUser):
+        await _handle_private_message(event)
+        return
+    # Kanal/guruh — kanal qoidalari
+    await _handle_channel_message(event)
 
 
 def register(client: TelegramClient) -> None:
@@ -147,6 +194,6 @@ def register(client: TelegramClient) -> None:
     @client.on(events.NewMessage(incoming=True))
     async def _on_new_message(event: events.NewMessage.Event) -> None:
         try:
-            await _handle_new_message(event)
+            await _dispatch(event)
         except Exception:
             log.exception("Userbot xabarni qayta ishlashda xato")
