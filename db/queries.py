@@ -5,61 +5,57 @@ from __future__ import annotations
 from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from db.models import AutoReply, ChannelRule, ForwardedFile
+from db.models import AutoReply, Channel, ForwardedFile, PendingVideo
 
-# ---------- ChannelRule ----------
+# ---------- Channel ----------
 
 
-async def add_rule(
+async def add_channel(
     session: AsyncSession,
     *,
     channel_id: int,
-    pattern: str,
-    pattern_type: str,
-    anime_id: int,
-    created_by: int,
-) -> ChannelRule:
-    row = ChannelRule(
+    title: str | None,
+    username: str | None,
+    added_by: int,
+) -> Channel:
+    existing = await session.scalar(select(Channel).where(Channel.channel_id == channel_id))
+    if existing is not None:
+        existing.title = title or existing.title
+        existing.username = username or existing.username
+        existing.active = True
+        await session.flush()
+        return existing
+    row = Channel(
         channel_id=channel_id,
-        pattern=pattern,
-        pattern_type=pattern_type,
-        anime_id=anime_id,
-        created_by=created_by,
+        title=title,
+        username=username,
+        added_by=added_by,
+        active=True,
     )
     session.add(row)
     await session.flush()
     return row
 
 
-async def remove_rule(session: AsyncSession, *, rule_id: int) -> int:
-    result = await session.execute(delete(ChannelRule).where(ChannelRule.id == rule_id))
+async def remove_channel(session: AsyncSession, *, channel_id: int) -> int:
+    result = await session.execute(delete(Channel).where(Channel.channel_id == channel_id))
     return result.rowcount or 0
 
 
-async def remove_rules_for_channel(session: AsyncSession, *, channel_id: int) -> int:
-    result = await session.execute(delete(ChannelRule).where(ChannelRule.channel_id == channel_id))
-    return result.rowcount or 0
+async def get_channel(session: AsyncSession, channel_id: int) -> Channel | None:
+    return await session.scalar(select(Channel).where(Channel.channel_id == channel_id))
 
 
-async def get_rules_for_channel(session: AsyncSession, channel_id: int) -> list[ChannelRule]:
-    result = await session.scalars(
-        select(ChannelRule).where(ChannelRule.channel_id == channel_id).order_by(ChannelRule.id)
+async def list_channels(session: AsyncSession) -> list[Channel]:
+    result = await session.scalars(select(Channel).order_by(Channel.title, Channel.channel_id))
+    return list(result.all())
+
+
+async def is_channel_tracked(session: AsyncSession, channel_id: int) -> bool:
+    row = await session.scalar(
+        select(Channel.id).where(Channel.channel_id == channel_id, Channel.active.is_(True))
     )
-    return list(result.all())
-
-
-async def list_all_rules(session: AsyncSession) -> list[ChannelRule]:
-    result = await session.scalars(select(ChannelRule).order_by(ChannelRule.channel_id, ChannelRule.id))
-    return list(result.all())
-
-
-async def get_rule(session: AsyncSession, rule_id: int) -> ChannelRule | None:
-    return await session.get(ChannelRule, rule_id)
-
-
-async def list_channel_ids(session: AsyncSession) -> list[int]:
-    result = await session.scalars(select(ChannelRule.channel_id).distinct())
-    return list(result.all())
+    return row is not None
 
 
 # ---------- AutoReply ----------
@@ -149,3 +145,55 @@ async def mark_forwarded(
 async def recent_forwarded(session: AsyncSession, limit: int = 10) -> list[ForwardedFile]:
     result = await session.scalars(select(ForwardedFile).order_by(ForwardedFile.id.desc()).limit(limit))
     return list(result.all())
+
+
+# ---------- PendingVideo ----------
+
+
+async def add_pending(
+    session: AsyncSession,
+    *,
+    file_unique_id: str,
+    source_channel_id: int,
+    source_message_id: int,
+    caption: str,
+    detected_title: str | None,
+    detected_episode: int | None,
+    reason: str,
+) -> PendingVideo | None:
+    existing = await session.scalar(select(PendingVideo).where(PendingVideo.file_unique_id == file_unique_id))
+    if existing is not None:
+        return existing
+    row = PendingVideo(
+        file_unique_id=file_unique_id,
+        source_channel_id=source_channel_id,
+        source_message_id=source_message_id,
+        caption=caption,
+        detected_title=detected_title,
+        detected_episode=detected_episode,
+        reason=reason,
+    )
+    session.add(row)
+    await session.flush()
+    return row
+
+
+async def remove_pending(session: AsyncSession, *, pending_id: int) -> int:
+    result = await session.execute(delete(PendingVideo).where(PendingVideo.id == pending_id))
+    return result.rowcount or 0
+
+
+async def get_pending(session: AsyncSession, pending_id: int) -> PendingVideo | None:
+    return await session.get(PendingVideo, pending_id)
+
+
+async def list_pending(session: AsyncSession, limit: int = 50) -> list[PendingVideo]:
+    result = await session.scalars(select(PendingVideo).order_by(PendingVideo.id.desc()).limit(limit))
+    return list(result.all())
+
+
+async def count_pending(session: AsyncSession) -> int:
+    from sqlalchemy import func as sa_func
+
+    row = await session.scalar(select(sa_func.count(PendingVideo.id)))
+    return int(row or 0)

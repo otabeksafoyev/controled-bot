@@ -2,36 +2,43 @@
 
 Yangi xabar kelganda:
 1. Agar xabar **shaxsiy chat**da (kontakt) bo'lsa — avtojavob qoidalari tekshiriladi.
-2. Aks holda (kanal xabari) — `watcher_channel_rules` ichida mos qoida qidiriladi:
-   - Caption qoida pattern-iga mos kelsa, o'sha anime_id ga qism sifatida yuboriladi.
-   - Video bo'lmasa, mos qoida bo'lmasa yoki dublikat bo'lsa — o'tkazib yuboriladi.
-3. Mos qoida topilsa: watcher videoni kaworai SECRET_CHANNEL ga
-   "ID: <anime_id>\\nQism: <episode>" caption bilan post qiladi.
-4. Kaworai_bot o'zining `add_episode_from_channel` handleri bilan DB-ga yozadi.
+2. Aks holda (kanal xabari) — video bo'lsa:
+   - Kanal kuzatiladigan kanallar ro'yxatida bo'lishi shart.
+   - Caption-dan qism raqami va kaworai DB-dagi anime nomi (case-insensitive
+     substring) bo'yicha anime_id topiladi.
+   - Mos kelsa → SECRET_CHANNEL ga "ID: X\\nQism: Y" caption bilan yuboradi.
+   - Mos kelmasa yoki qism raqami yo'q bo'lsa → `watcher_pending` ga qo'shiladi
+     va owner-ga inline tugmali xabar jo'natiladi.
 """
 
 from __future__ import annotations
 
 import logging
 
+from aiogram import Bot
 from telethon import TelegramClient, events
 from telethon.tl.types import (
     DocumentAttributeFilename,
     DocumentAttributeVideo,
     MessageMediaDocument,
+    PeerChannel,
+    PeerChat,
     PeerUser,
     User,
 )
 
+from bot.keyboards import pending_actions
 from config import settings
 from db.engine import AsyncSessionLocal
 from db.queries import (
-    get_rules_for_channel,
+    add_pending,
+    is_channel_tracked,
     is_forwarded,
     list_active_auto_replies,
     mark_forwarded,
 )
-from userbot.matcher import parse_meta
+from kaworai.queries import episode_exists, get_animes
+from userbot.matcher import find_anime_match, parse_meta
 from userbot.rules import match_pattern
 
 log = logging.getLogger(__name__)
@@ -59,30 +66,74 @@ def _extract_video_meta(message: object) -> tuple[str | None, int, str | None]:
     return unique_id, duration, filename
 
 
-async def _handle_channel_message(event: events.NewMessage.Event) -> None:
+def _channel_id_candidates(peer_id: int) -> list[int]:
+    """Telethon Channel.id pozitiv, lekin biz DB da -100... ko'rinishida saqlaymiz."""
+    candidates = [peer_id]
+    if peer_id > 0:
+        candidates.append(int(f"-100{peer_id}"))
+    elif peer_id < 0:
+        raw = str(peer_id).lstrip("-")
+        if raw.startswith("100"):
+            candidates.append(int(raw[3:]))
+    return candidates
+
+
+async def _notify_owner_pending(
+    bot: Bot,
+    *,
+    pending_id: int,
+    channel_title: str | None,
+    caption: str,
+    detected_title: str | None,
+    detected_episode: int | None,
+    reason: str,
+) -> None:
+    short_caption = (caption or "").strip().splitlines()[0] if caption else "(bo'sh)"
+    if len(short_caption) > 200:
+        short_caption = short_caption[:200] + "…"
+    reason_lbl = {
+        "no_match": "Anime topilmadi",
+        "no_episode": "Qism raqami topilmadi",
+        "season_only": "Faqat fasl (qism yo'q)",
+    }.get(reason, reason)
+    lines = [
+        "<b>🎬 Yangi video — qo'lda hal qilish kerak</b>",
+        f"Kanal: <b>{channel_title or '?'}</b>",
+        f"Sabab: <i>{reason_lbl}</i>",
+    ]
+    if detected_title:
+        lines.append(f"Taxminan: <code>{detected_title}</code>")
+    if detected_episode is not None:
+        lines.append(f"Qism: <b>{detected_episode}</b>")
+    lines.append("")
+    lines.append(f"Caption: {short_caption}")
+    try:
+        await bot.send_message(
+            settings.OWNER_ID,
+            "\n".join(lines),
+            reply_markup=pending_actions(pending_id),
+        )
+    except Exception:
+        log.exception("Owner-ga xabar yuborishda xato pending=%s", pending_id)
+
+
+async def _handle_channel_message(event: events.NewMessage.Event, bot: Bot) -> None:
     message = event.message
     peer_id = getattr(event.chat, "id", None)
     if peer_id is None:
         return
 
-    # Telethon Channel.id pozitiv, lekin DB da -100… ko'rinishida saqlanadi.
-    candidates = [peer_id]
-    if peer_id > 0:
-        candidates.append(int(f"-100{peer_id}"))
-    if peer_id < 0:
-        raw = str(peer_id).lstrip("-")
-        if raw.startswith("100"):
-            candidates.append(int(raw[3:]))
+    candidates = _channel_id_candidates(peer_id)
 
     async with AsyncSessionLocal() as session:
-        rules: list = []
+        tracked = False
         matched_channel_id = peer_id
         for cid in candidates:
-            rules = await get_rules_for_channel(session, cid)
-            if rules:
+            if await is_channel_tracked(session, cid):
+                tracked = True
                 matched_channel_id = cid
                 break
-        if not rules:
+        if not tracked:
             return
 
         unique_id, duration, filename = _extract_video_meta(message)
@@ -95,27 +146,91 @@ async def _handle_channel_message(event: events.NewMessage.Event) -> None:
             log.info("Skip (allaqachon yuborilgan) uid=%s", unique_id)
             return
 
-        # FAQAT caption ni tekshiramiz (user tanlovi).
-        caption_text = message.message or ""
-        selected = None
-        for rule in rules:
-            if match_pattern(caption_text, rule.pattern, rule.pattern_type):
-                selected = rule
-                break
-        if selected is None:
-            log.info(
-                "Skip (hech qaysi qoidaga mos kelmadi) channel=%s uid=%s caption=%r",
-                matched_channel_id,
-                unique_id,
-                caption_text[:80],
+    caption_text = message.message or ""
+    parse = parse_meta(caption_text or filename or "")
+
+    channel_title = getattr(event.chat, "title", None)
+
+    # 1. Qism raqami shart
+    if parse.episode is None:
+        reason = "season_only" if parse.is_season_only else "no_episode"
+        async with AsyncSessionLocal() as session:
+            row = await add_pending(
+                session,
+                file_unique_id=unique_id,
+                source_channel_id=matched_channel_id,
+                source_message_id=int(getattr(message, "id", 0) or 0),
+                caption=caption_text,
+                detected_title=None,
+                detected_episode=None,
+                reason=reason,
             )
-            return
+            await session.commit()
+        if row is not None:
+            await _notify_owner_pending(
+                bot,
+                pending_id=row.id,
+                channel_title=channel_title,
+                caption=caption_text,
+                detected_title=None,
+                detected_episode=None,
+                reason=reason,
+            )
+        return
 
-        anime_id = selected.anime_id
-        # Qism raqami — captiondan (fallback filename bilan)
-        meta = parse_meta(caption_text or filename or "")
-        episode = meta.episode if meta.episode is not None else 1
+    # 2. Anime nomini DB dan topishga urinish
+    animes = await get_animes()
+    match = find_anime_match(caption_text, [(a.id, a.title) for a in animes])
 
+    if match is None:
+        async with AsyncSessionLocal() as session:
+            row = await add_pending(
+                session,
+                file_unique_id=unique_id,
+                source_channel_id=matched_channel_id,
+                source_message_id=int(getattr(message, "id", 0) or 0),
+                caption=caption_text,
+                detected_title=None,
+                detected_episode=parse.episode,
+                reason="no_match",
+            )
+            await session.commit()
+        if row is not None:
+            await _notify_owner_pending(
+                bot,
+                pending_id=row.id,
+                channel_title=channel_title,
+                caption=caption_text,
+                detected_title=None,
+                detected_episode=parse.episode,
+                reason="no_match",
+            )
+        return
+
+    anime_id, matched_title = match
+    episode = parse.episode
+
+    # 3. Kaworai DB da shu qism allaqachon bor bo'lsa — skip
+    if await episode_exists(anime_id, episode):
+        log.info(
+            "Skip (qism allaqachon bor) anime=%s[%s] ep=%s uid=%s",
+            anime_id,
+            matched_title,
+            episode,
+            unique_id,
+        )
+        async with AsyncSessionLocal() as session:
+            await mark_forwarded(
+                session,
+                file_unique_id=unique_id,
+                anime_id=anime_id,
+                episode=episode,
+                source_channel_id=matched_channel_id,
+            )
+            await session.commit()
+        return
+
+    # 4. SECRET_CHANNEL ga yuborish
     caption_out = f"ID: {anime_id}\nQism: {episode}"
     try:
         await event.client.send_file(
@@ -125,7 +240,7 @@ async def _handle_channel_message(event: events.NewMessage.Event) -> None:
         )
     except Exception:
         log.exception(
-            "SECRET_CHANNEL ga yuborishda xato (anime=%s ep=%s uid=%s)",
+            "SECRET_CHANNEL ga yuborishda xato anime=%s ep=%s uid=%s",
             anime_id,
             episode,
             unique_id,
@@ -143,12 +258,12 @@ async def _handle_channel_message(event: events.NewMessage.Event) -> None:
         await session.commit()
 
     log.info(
-        "Kaworai SECRET_CHANNEL ga yuborildi: anime=%s ep=%s uid=%s (qoida #%s pattern=%r)",
+        "Forwarded: anime=%s[%s] ep=%s channel=%s uid=%s",
         anime_id,
+        matched_title,
         episode,
+        matched_channel_id,
         unique_id,
-        selected.id,
-        selected.pattern,
     )
 
 
@@ -159,41 +274,38 @@ async def _handle_private_message(event: events.NewMessage.Event) -> None:
         return
     if sender.bot or sender.is_self:
         return
-    # Faqat kontakt — Telegram User.contact flag
     if not getattr(sender, "contact", False):
         return
 
-    text = event.message.message or ""
-    if not text:
+    text_in = event.message.message or ""
+    if not text_in.strip():
         return
 
     async with AsyncSessionLocal() as session:
         replies = await list_active_auto_replies(session)
 
-    for reply in replies:
-        if match_pattern(text, reply.pattern, reply.pattern_type):
+    for r in replies:
+        if match_pattern(text_in, r.pattern, r.pattern_type):
             try:
-                await event.client.send_message(sender.id, reply.reply_text)
+                await event.reply(r.reply_text)
             except Exception:
-                log.exception("Avtojavob yuborishda xato (sender=%s)", sender.id)
+                log.exception("Avtojavob yuborishda xato reply_id=%s", r.id)
             return
 
 
-async def _dispatch(event: events.NewMessage.Event) -> None:
-    # Shaxsiy chat (PeerUser) — avtojavob
-    if isinstance(event.message.peer_id, PeerUser):
+async def _dispatch(event: events.NewMessage.Event, bot: Bot) -> None:
+    peer = event.message.peer_id if event.message else None
+    if isinstance(peer, PeerUser):
         await _handle_private_message(event)
         return
-    # Kanal/guruh — kanal qoidalari
-    await _handle_channel_message(event)
+    if isinstance(peer, PeerChannel | PeerChat):
+        await _handle_channel_message(event, bot)
 
 
-def register(client: TelegramClient) -> None:
-    """Telethon handlerlarni ro'yxatdan o'tkazish."""
-
+def register(client: TelegramClient, bot: Bot) -> None:
     @client.on(events.NewMessage(incoming=True))
-    async def _on_new_message(event: events.NewMessage.Event) -> None:
+    async def _on_new(event: events.NewMessage.Event) -> None:
         try:
-            await _dispatch(event)
+            await _dispatch(event, bot)
         except Exception:
-            log.exception("Userbot xabarni qayta ishlashda xato")
+            log.exception("Userbot handleri xato")
