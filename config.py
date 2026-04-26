@@ -22,11 +22,20 @@ class Settings(BaseSettings):
     # formatida. Kaworai_bot o'zining mavjud handleri bilan DB-ga yozadi.
     SECRET_CHANNEL_ID: int
 
-    # Watcher o'z state'ini saqlaydigan SQLite fayli (kanal→anime map, dedup)
+    # Kaworai_bot PostgreSQL URL — anime nomini ID ga avtomatik yechish uchun.
+    # Faqat READ (SELECT). Masalan Railway ichki hostname:
+    #   postgresql+asyncpg://postgres:<pwd>@postgres.railway.internal:5432/railway
+    # Bo'sh bo'lsa, avto-matching o'chadi va barcha videolar pending-ga tushadi.
+    KAWORAI_DATABASE_URL: str = ""
+
+    # Watcher o'z state'ini saqlaydigan SQLite fayli
     SQLITE_PATH: str = "watcher.db"
 
     # Parser
     MIN_VIDEO_DURATION: int = 60
+
+    # Anime kesh yangilanish intervali (soniya)
+    ANIME_CACHE_TTL: int = 300
 
     LOG_LEVEL: str = Field(default="INFO")
 

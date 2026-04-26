@@ -12,10 +12,11 @@ from aiogram import Bot
 from bot.client import bot, dp
 from bot.handlers import channels as channels_handlers
 from bot.handlers import menu as menu_handlers
+from bot.handlers import pending as pending_handlers
 from bot.handlers import replies as replies_handlers
 from config import settings
 from db.engine import engine
-from db.migrations import migrate_legacy_channel_links
+from db.migrations import migrate_rules_to_channels
 from db.models import Base
 from userbot.client import build_client
 from userbot.handlers import register as register_userbot_handlers
@@ -31,7 +32,7 @@ def _setup_logging() -> None:
 async def _init_db() -> None:
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
-    await migrate_legacy_channel_links(engine)
+    await migrate_rules_to_channels(engine)
 
 
 async def _run() -> None:
@@ -42,7 +43,7 @@ async def _run() -> None:
     log.info("SQLite tayyor: %s", settings.SQLITE_PATH)
 
     userbot = build_client()
-    register_userbot_handlers(userbot)
+    register_userbot_handlers(userbot, bot)
     await userbot.start()
     me = await userbot.get_me()
     log.info("Userbot ready: @%s (id=%s)", me.username, me.id)
@@ -50,9 +51,16 @@ async def _run() -> None:
     bot_me = await bot.get_me()
     log.info("Control bot ready: @%s (id=%s)", bot_me.username, bot_me.id)
     log.info("SECRET_CHANNEL_ID: %s", settings.SECRET_CHANNEL_ID)
+    if settings.KAWORAI_DATABASE_URL:
+        log.info("Kaworai DB: ulanish sozlangan")
+    else:
+        log.warning(
+            "KAWORAI_DATABASE_URL bo'sh — anime avto-matching o'chiq, " "barcha videolar pending-ga tushadi"
+        )
 
     dp.include_router(menu_handlers.router)
     dp.include_router(channels_handlers.router)
+    dp.include_router(pending_handlers.router)
     dp.include_router(replies_handlers.router)
 
     stop_event = asyncio.Event()

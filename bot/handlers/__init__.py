@@ -1,5 +1,5 @@
 """Aiogram routers."""
 
-from bot.handlers import channels, menu, replies
+from bot.handlers import channels, menu, pending, replies
 
-__all__ = ["channels", "menu", "replies"]
+__all__ = ["channels", "menu", "pending", "replies"]
