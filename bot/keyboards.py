@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
-from db.models import DOW_NAMES_UZ, AutoReply, Channel, Workout, WorkoutSchedule
+from db.models import DOW_NAMES_UZ, AutoReply, Channel, Exercise, Workout, WorkoutSchedule
 
 
 def main_menu(pending_count: int = 0) -> InlineKeyboardMarkup:
@@ -216,14 +216,17 @@ def workouts_list(workouts: list[Workout]) -> InlineKeyboardMarkup:
             label = label[:57] + "…"
         rows.append([InlineKeyboardButton(text=label, callback_data=f"wo:view:{w.id}")])
     rows.append([InlineKeyboardButton(text="➕ Yangi mashq", callback_data="wo:add")])
+    rows.append([InlineKeyboardButton(text="📥 Tayyor reja import", callback_data="wo:import")])
     rows.append([InlineKeyboardButton(text="◀️ Bosh menyu", callback_data="menu:main")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
-def workout_detail(workout_id: int, has_schedules: bool) -> InlineKeyboardMarkup:
+def workout_detail(workout_id: int, has_schedules: bool, exercises_count: int = 0) -> InlineKeyboardMarkup:
     schedules_label = "📅 Jadvallar" if has_schedules else "📅 Jadval qo'shish"
+    ex_label = f"📋 Mashqlar ({exercises_count})" if exercises_count else "📋 Mashq qo'shish"
     return InlineKeyboardMarkup(
         inline_keyboard=[
+            [InlineKeyboardButton(text=ex_label, callback_data=f"wo:exs:{workout_id}")],
             [InlineKeyboardButton(text=schedules_label, callback_data=f"wo:scheds:{workout_id}")],
             [InlineKeyboardButton(text="🗑 Mashqni o'chirish", callback_data=f"wo:delask:{workout_id}")],
             [InlineKeyboardButton(text="◀️ Mashqlar", callback_data="menu:workouts")],
@@ -363,3 +366,91 @@ def workout_picker(workouts: list[Workout], day_idx: int, *, allow_new: bool = T
         )
     rows.append([InlineKeyboardButton(text="◀️ Kun", callback_data=f"week:day:{day_idx}")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+# -------- Exercises (sub-items inside a Workout) --------
+
+
+def exercises_list(workout_id: int, exercises: list[Exercise]) -> InlineKeyboardMarkup:
+    rows: list[list[InlineKeyboardButton]] = []
+    for i, e in enumerate(exercises, start=1):
+        spec = f" — {e.spec}" if e.spec else ""
+        label = f"{i}. {e.name}{spec}"
+        if len(label) > 64:
+            label = label[:61] + "…"
+        rows.append([InlineKeyboardButton(text=label, callback_data=f"ex:view:{e.id}")])
+    rows.append([InlineKeyboardButton(text="➕ Mashq qo'shish", callback_data=f"ex:add:{workout_id}")])
+    rows.append([InlineKeyboardButton(text="◀️ Mashq", callback_data=f"wo:view:{workout_id}")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def exercise_detail(exercise_id: int, workout_id: int, has_media: bool = False) -> InlineKeyboardMarkup:
+    media_label = "🖼 Media (mavjud)" if has_media else "🖼 Media qo'shish"
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text=media_label, callback_data=f"ex:media:{exercise_id}")],
+            [
+                InlineKeyboardButton(text="✏️ Nom", callback_data=f"ex:edname:{exercise_id}"),
+                InlineKeyboardButton(text="✏️ Spec", callback_data=f"ex:edspec:{exercise_id}"),
+            ],
+            [InlineKeyboardButton(text="✏️ Tavsif", callback_data=f"ex:eddesc:{exercise_id}")],
+            [InlineKeyboardButton(text="🗑 O'chirish", callback_data=f"ex:delask:{exercise_id}")],
+            [InlineKeyboardButton(text="◀️ Mashqlar", callback_data=f"wo:exs:{workout_id}")],
+        ]
+    )
+
+
+def exercise_delete_confirm(exercise_id: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(text="✅ Ha, o'chir", callback_data=f"ex:delok:{exercise_id}"),
+                InlineKeyboardButton(text="❌ Bekor", callback_data=f"ex:view:{exercise_id}"),
+            ]
+        ]
+    )
+
+
+def exercise_media_actions(exercise_id: int, has_media: bool) -> InlineKeyboardMarkup:
+    rows: list[list[InlineKeyboardButton]] = [
+        [InlineKeyboardButton(text="➕ Yangi rasm/video", callback_data=f"ex:medadd:{exercise_id}")]
+    ]
+    if has_media:
+        rows.append(
+            [InlineKeyboardButton(text="🗑 Hammasini o'chirish", callback_data=f"ex:medclr:{exercise_id}")]
+        )
+    rows.append([InlineKeyboardButton(text="◀️ Mashq", callback_data=f"ex:view:{exercise_id}")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def exercise_media_done(exercise_id: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(text="✅ Tugatish", callback_data=f"ex:medfin:{exercise_id}"),
+                InlineKeyboardButton(text="❌ Bekor", callback_data="wiz:cancel"),
+            ]
+        ]
+    )
+
+
+def exercise_spec_skip() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(text="⏭ Spec yo'q", callback_data="ex:specskip"),
+                InlineKeyboardButton(text="❌ Bekor", callback_data="wiz:cancel"),
+            ]
+        ]
+    )
+
+
+def exercise_desc_skip() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(text="⏭ Tavsif yo'q", callback_data="ex:descskip"),
+                InlineKeyboardButton(text="❌ Bekor", callback_data="wiz:cancel"),
+            ]
+        ]
+    )

@@ -122,6 +122,35 @@ class WorkoutMedia(Base):
     order_idx: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
 
 
+class Exercise(Base):
+    """Mashq ichidagi alohida harakat (Wide Push-up, Bicep Curl, ...).
+
+    Bir Workout (kun rejasi) bir nechta Exercise dan iborat. Har birining
+    o'z spec satri ('4×12', '5×maks', '4×30s'), tavsifi va alohida media-si
+    bo'lishi mumkin.
+    """
+
+    __tablename__ = "watcher_exercises"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    workout_id: Mapped[int] = mapped_column(Integer, nullable=False, index=True)
+    name: Mapped[str] = mapped_column(String(128), nullable=False)
+    spec: Mapped[str] = mapped_column(String(64), nullable=False, default="")
+    description: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    order_idx: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+
+
+class ExerciseMedia(Base):
+    """Ayrim mashqqa biriktirilgan rasm/video — qanday bajarish ko'rsatilishi uchun."""
+
+    __tablename__ = "watcher_exercise_media"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    exercise_id: Mapped[int] = mapped_column(Integer, nullable=False, index=True)
+    file_id: Mapped[str] = mapped_column(String(256), nullable=False)
+    file_type: Mapped[str] = mapped_column(String(16), nullable=False, default=MEDIA_PHOTO)
+    order_idx: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+
+
 class WorkoutSchedule(Base):
     """Mashq jadvali — kunlar (bitmask) + HH:MM."""
 

@@ -14,6 +14,13 @@ from bot.common import accessible, is_owner_callback, is_owner_message
 from bot.keyboards import (
     days_label,
     days_picker,
+    exercise_delete_confirm,
+    exercise_desc_skip,
+    exercise_detail,
+    exercise_media_actions,
+    exercise_media_done,
+    exercise_spec_skip,
+    exercises_list,
     schedule_detail,
     schedules_list,
     wizard_cancel,
@@ -24,7 +31,13 @@ from bot.keyboards import (
     workouts_list,
 )
 from bot.services.workout_scheduler import WorkoutScheduler
-from bot.states import AddScheduleStates, AddWorkoutStates
+from bot.states import (
+    AddExerciseMediaStates,
+    AddExerciseStates,
+    AddScheduleStates,
+    AddWorkoutStates,
+    EditExerciseStates,
+)
 from db.engine import AsyncSessionLocal
 from db.models import (
     MEDIA_ANIMATION,
@@ -35,18 +48,26 @@ from db.models import (
     REM_SKIPPED,
 )
 from db.queries import (
+    add_exercise,
+    add_exercise_media,
     add_workout,
     add_workout_media,
     add_workout_schedule,
+    clear_exercise_media,
+    get_exercise,
     get_workout,
     get_workout_reminder,
     get_workout_schedule,
+    list_exercise_media,
+    list_exercises,
     list_schedules_for_workout,
     list_workout_media,
     list_workouts,
+    remove_exercise,
     remove_workout,
     remove_workout_schedule,
     toggle_workout_schedule,
+    update_exercise,
     update_reminder_status,
 )
 
@@ -55,12 +76,15 @@ router = Router(name="workouts")
 router.message.filter(F.chat.type == "private")
 
 
-def _format_workout_view(name: str, description: str, n_media: int, n_schedules: int) -> str:
+def _format_workout_view(
+    name: str, description: str, n_media: int, n_schedules: int, n_exercises: int = 0
+) -> str:
     parts = [f"<b>💪 {escape(name)}</b>"]
     if description:
         parts.append("")
         parts.append(escape(description))
     parts.append("")
+    parts.append(f"📋 Mashqlar: <b>{n_exercises}</b>")
     parts.append(f"📎 Media: <b>{n_media}</b>")
     parts.append(f"📅 Jadvallar: <b>{n_schedules}</b>")
     return "\n".join(parts)
@@ -235,8 +259,16 @@ async def _show_workout(cb: CallbackQuery, workout_id: int) -> None:
             return
         media = await list_workout_media(session, workout_id)
         schedules = await list_schedules_for_workout(session, workout_id)
-    text = _format_workout_view(workout.name, workout.description, len(media), len(schedules))
-    await msg.edit_text(text, reply_markup=workout_detail(workout_id, has_schedules=bool(schedules)))
+        exercises = await list_exercises(session, workout_id)
+    text = _format_workout_view(workout.name, workout.description, len(media), len(schedules), len(exercises))
+    await msg.edit_text(
+        text,
+        reply_markup=workout_detail(
+            workout_id,
+            has_schedules=bool(schedules),
+            exercises_count=len(exercises),
+        ),
+    )
     await cb.answer()
 
 
@@ -578,3 +610,523 @@ async def _strip_buttons(cb: CallbackQuery, suffix: str) -> None:
             await msg.edit_text(new_text, reply_markup=None)
     except Exception:
         log.exception("Failed to strip buttons")
+
+
+# ---------- Exercises (sub-items inside a Workout) ----------
+
+
+async def _show_exercises(cb: CallbackQuery, workout_id: int) -> None:
+    msg = accessible(cb)
+    if msg is None:
+        return
+    async with AsyncSessionLocal() as session:
+        workout = await get_workout(session, workout_id)
+        if workout is None:
+            await cb.answer("Topilmadi", show_alert=True)
+            return
+        exercises = await list_exercises(session, workout_id)
+    if not exercises:
+        text = f"<b>📋 {escape(workout.name)} — mashqlar</b>\n\n" "Hozircha hech qanday mashq qo'shilmagan."
+    else:
+        lines = [f"<b>📋 {escape(workout.name)} — {len(exercises)} ta mashq</b>", ""]
+        for i, e in enumerate(exercises, start=1):
+            spec = f" · {escape(e.spec)}" if e.spec else ""
+            lines.append(f"<b>{i}.</b> {escape(e.name)}{spec}")
+        text = "\n".join(lines)
+    await msg.edit_text(text, reply_markup=exercises_list(workout_id, exercises))
+    await cb.answer()
+
+
+@router.callback_query(F.data.startswith("wo:exs:"))
+async def cb_exs(cb: CallbackQuery, state: FSMContext) -> None:
+    if not is_owner_callback(cb):
+        return
+    await state.clear()
+    workout_id = int((cb.data or "").split(":")[-1])
+    await _show_exercises(cb, workout_id)
+
+
+@router.callback_query(F.data.startswith("ex:view:"))
+async def cb_ex_view(cb: CallbackQuery, state: FSMContext) -> None:
+    if not is_owner_callback(cb):
+        return
+    msg = accessible(cb)
+    if msg is None:
+        return
+    await state.clear()
+    exercise_id = int((cb.data or "").split(":")[-1])
+    async with AsyncSessionLocal() as session:
+        ex = await get_exercise(session, exercise_id)
+        if ex is None:
+            await cb.answer("Topilmadi", show_alert=True)
+            return
+        media = await list_exercise_media(session, exercise_id)
+        workout = await get_workout(session, ex.workout_id)
+    parts = [f"<b>📋 {escape(ex.name)}</b>"]
+    if ex.spec:
+        parts.append(f"<i>{escape(ex.spec)}</i>")
+    if ex.description:
+        parts.append("")
+        parts.append(escape(ex.description))
+    parts.append("")
+    parts.append(f"🖼 Media: <b>{len(media)}</b>")
+    if workout:
+        parts.append(f"📅 Mashq: <b>{escape(workout.name)}</b>")
+    await msg.edit_text(
+        "\n".join(parts),
+        reply_markup=exercise_detail(exercise_id, ex.workout_id, has_media=bool(media)),
+    )
+    await cb.answer()
+
+
+@router.callback_query(F.data.startswith("ex:add:"))
+async def cb_ex_add(cb: CallbackQuery, state: FSMContext) -> None:
+    if not is_owner_callback(cb):
+        return
+    msg = accessible(cb)
+    if msg is None:
+        return
+    workout_id = int((cb.data or "").split(":")[-1])
+    async with AsyncSessionLocal() as session:
+        workout = await get_workout(session, workout_id)
+    if workout is None:
+        await cb.answer("Topilmadi", show_alert=True)
+        return
+    await state.set_state(AddExerciseStates.waiting_for_name)
+    await state.update_data(workout_id=workout_id, media=[])
+    await msg.edit_text(
+        f"<b>➕ Yangi mashq — {escape(workout.name)}</b>\n\n"
+        "Nomini yuboring (mas. <code>Wide Push-up</code>):",
+        reply_markup=wizard_cancel(),
+    )
+    await cb.answer()
+
+
+@router.message(AddExerciseStates.waiting_for_name)
+async def m_ex_name(message: Message, state: FSMContext) -> None:
+    if not is_owner_message(message):
+        return
+    name = (message.text or "").strip()
+    if not name or len(name) > 128:
+        await message.answer("Nom 1-128 belgi orasida bo'lsin. Qayta yuboring:")
+        return
+    await state.update_data(name=name)
+    await state.set_state(AddExerciseStates.waiting_for_spec)
+    await message.answer(
+        "Set/reps spec yuboring (mas. <code>4×12</code>, <code>5×maks</code>, "
+        "<code>4×30s</code>, <code>4×12/12</code>) yoki tugmani bosing:",
+        reply_markup=exercise_spec_skip(),
+    )
+
+
+@router.message(AddExerciseStates.waiting_for_spec)
+async def m_ex_spec(message: Message, state: FSMContext) -> None:
+    if not is_owner_message(message):
+        return
+    spec = (message.text or "").strip()
+    if len(spec) > 64:
+        await message.answer("Spec 64 belgidan oshmasin. Qayta yuboring:")
+        return
+    await state.update_data(spec=spec)
+    await state.set_state(AddExerciseStates.waiting_for_description)
+    await message.answer(
+        "Tavsifni yuboring (mashq qanday bajariladi) yoki tugmani bosing:",
+        reply_markup=exercise_desc_skip(),
+    )
+
+
+@router.callback_query(F.data == "ex:specskip", AddExerciseStates.waiting_for_spec)
+async def cb_ex_specskip(cb: CallbackQuery, state: FSMContext) -> None:
+    if not is_owner_callback(cb):
+        return
+    msg = accessible(cb)
+    if msg is None:
+        return
+    await state.update_data(spec="")
+    await state.set_state(AddExerciseStates.waiting_for_description)
+    await msg.edit_text(
+        "Tavsifni yuboring (mashq qanday bajariladi) yoki tugmani bosing:",
+        reply_markup=exercise_desc_skip(),
+    )
+    await cb.answer()
+
+
+@router.message(AddExerciseStates.waiting_for_description)
+async def m_ex_desc(message: Message, state: FSMContext) -> None:
+    if not is_owner_message(message):
+        return
+    desc = (message.text or "").strip()
+    await state.update_data(description=desc)
+    await state.set_state(AddExerciseStates.waiting_for_media)
+    await message.answer(
+        "Endi 0+ rasm/video/animatsiya yuboring (qanday qilinishini ko'rsatuvchi). "
+        "Tugatgach pastdagi tugmani bosing.",
+        reply_markup=workout_media_done(),
+    )
+
+
+@router.callback_query(F.data == "ex:descskip", AddExerciseStates.waiting_for_description)
+async def cb_ex_descskip(cb: CallbackQuery, state: FSMContext) -> None:
+    if not is_owner_callback(cb):
+        return
+    msg = accessible(cb)
+    if msg is None:
+        return
+    await state.update_data(description="")
+    await state.set_state(AddExerciseStates.waiting_for_media)
+    await msg.edit_text(
+        "Endi 0+ rasm/video/animatsiya yuboring (qanday qilinishini ko'rsatuvchi). "
+        "Tugatgach pastdagi tugmani bosing.",
+        reply_markup=workout_media_done(),
+    )
+    await cb.answer()
+
+
+@router.message(AddExerciseStates.waiting_for_media, F.photo | F.video | F.animation)
+async def m_ex_media(message: Message, state: FSMContext) -> None:
+    if not is_owner_message(message):
+        return
+    file_id, file_type = _extract_media(message)
+    if not file_id:
+        return
+    data = await state.get_data()
+    media: list[dict] = list(data.get("media", []))
+    media.append({"file_id": file_id, "file_type": file_type})
+    await state.update_data(media=media)
+    await message.answer(
+        f"Qabul qilindi. Jami media: <b>{len(media)}</b>.",
+        reply_markup=workout_media_more(),
+    )
+
+
+@router.callback_query(
+    F.data.in_({"wo:media:none", "wo:media:save"}),
+    AddExerciseStates.waiting_for_media,
+)
+async def cb_ex_media_done(cb: CallbackQuery, state: FSMContext) -> None:
+    if not is_owner_callback(cb):
+        return
+    msg = accessible(cb)
+    if msg is None:
+        return
+    data = await state.get_data()
+    workout_id = int(data.get("workout_id", 0))
+    name = data.get("name", "").strip()
+    spec = data.get("spec", "").strip()
+    description = data.get("description", "").strip()
+    media: list[dict] = data.get("media", [])
+    if not workout_id or not name:
+        await cb.answer("Ma'lumot to'liq emas", show_alert=True)
+        return
+    async with AsyncSessionLocal() as session:
+        ex = await add_exercise(
+            session,
+            workout_id=workout_id,
+            name=name,
+            spec=spec,
+            description=description,
+        )
+        for idx, m in enumerate(media):
+            await add_exercise_media(
+                session,
+                exercise_id=ex.id,
+                file_id=m["file_id"],
+                file_type=m["file_type"],
+                order_idx=idx,
+            )
+        await session.commit()
+    await state.clear()
+    await msg.edit_text(
+        f"✅ Mashq qo'shildi: <b>{escape(name)}</b>" + (f" · <i>{escape(spec)}</i>" if spec else "")
+    )
+    await cb.answer("Saqlandi")
+
+
+# ---------- Exercise edit (name/spec/description) ----------
+
+
+@router.callback_query(F.data.startswith("ex:edname:"))
+async def cb_ex_edname(cb: CallbackQuery, state: FSMContext) -> None:
+    if not is_owner_callback(cb):
+        return
+    msg = accessible(cb)
+    if msg is None:
+        return
+    exercise_id = int((cb.data or "").split(":")[-1])
+    await state.set_state(EditExerciseStates.waiting_for_name)
+    await state.update_data(exercise_id=exercise_id)
+    await msg.edit_text("Yangi nomni yuboring (1-128 belgi):", reply_markup=wizard_cancel())
+    await cb.answer()
+
+
+@router.message(EditExerciseStates.waiting_for_name)
+async def m_ex_edname(message: Message, state: FSMContext) -> None:
+    if not is_owner_message(message):
+        return
+    name = (message.text or "").strip()
+    if not name or len(name) > 128:
+        await message.answer("Nom 1-128 belgi orasida bo'lsin. Qayta yuboring:")
+        return
+    data = await state.get_data()
+    exercise_id = int(data["exercise_id"])
+    async with AsyncSessionLocal() as session:
+        await update_exercise(session, exercise_id=exercise_id, name=name)
+        await session.commit()
+    await state.clear()
+    await message.answer(f"✅ Nom yangilandi: <b>{escape(name)}</b>")
+
+
+@router.callback_query(F.data.startswith("ex:edspec:"))
+async def cb_ex_edspec(cb: CallbackQuery, state: FSMContext) -> None:
+    if not is_owner_callback(cb):
+        return
+    msg = accessible(cb)
+    if msg is None:
+        return
+    exercise_id = int((cb.data or "").split(":")[-1])
+    await state.set_state(EditExerciseStates.waiting_for_spec)
+    await state.update_data(exercise_id=exercise_id)
+    await msg.edit_text(
+        "Yangi spec yuboring (mas. <code>4×12</code>) yoki tugmani bosing:",
+        reply_markup=exercise_spec_skip(),
+    )
+    await cb.answer()
+
+
+@router.message(EditExerciseStates.waiting_for_spec)
+async def m_ex_edspec(message: Message, state: FSMContext) -> None:
+    if not is_owner_message(message):
+        return
+    spec = (message.text or "").strip()
+    if len(spec) > 64:
+        await message.answer("Spec 64 belgidan oshmasin. Qayta yuboring:")
+        return
+    data = await state.get_data()
+    exercise_id = int(data["exercise_id"])
+    async with AsyncSessionLocal() as session:
+        await update_exercise(session, exercise_id=exercise_id, spec=spec)
+        await session.commit()
+    await state.clear()
+    await message.answer(f"✅ Spec yangilandi: <b>{escape(spec) or '—'}</b>")
+
+
+@router.callback_query(F.data == "ex:specskip", EditExerciseStates.waiting_for_spec)
+async def cb_ex_edspecskip(cb: CallbackQuery, state: FSMContext) -> None:
+    if not is_owner_callback(cb):
+        return
+    msg = accessible(cb)
+    if msg is None:
+        return
+    data = await state.get_data()
+    exercise_id = int(data["exercise_id"])
+    async with AsyncSessionLocal() as session:
+        await update_exercise(session, exercise_id=exercise_id, spec="")
+        await session.commit()
+    await state.clear()
+    await msg.edit_text("✅ Spec o'chirildi.")
+    await cb.answer()
+
+
+@router.callback_query(F.data.startswith("ex:eddesc:"))
+async def cb_ex_eddesc(cb: CallbackQuery, state: FSMContext) -> None:
+    if not is_owner_callback(cb):
+        return
+    msg = accessible(cb)
+    if msg is None:
+        return
+    exercise_id = int((cb.data or "").split(":")[-1])
+    await state.set_state(EditExerciseStates.waiting_for_description)
+    await state.update_data(exercise_id=exercise_id)
+    await msg.edit_text("Yangi tavsifni yuboring yoki tugmani bosing:", reply_markup=exercise_desc_skip())
+    await cb.answer()
+
+
+@router.message(EditExerciseStates.waiting_for_description)
+async def m_ex_eddesc(message: Message, state: FSMContext) -> None:
+    if not is_owner_message(message):
+        return
+    desc = (message.text or "").strip()
+    data = await state.get_data()
+    exercise_id = int(data["exercise_id"])
+    async with AsyncSessionLocal() as session:
+        await update_exercise(session, exercise_id=exercise_id, description=desc)
+        await session.commit()
+    await state.clear()
+    await message.answer("✅ Tavsif yangilandi.")
+
+
+@router.callback_query(F.data == "ex:descskip", EditExerciseStates.waiting_for_description)
+async def cb_ex_eddescskip(cb: CallbackQuery, state: FSMContext) -> None:
+    if not is_owner_callback(cb):
+        return
+    msg = accessible(cb)
+    if msg is None:
+        return
+    data = await state.get_data()
+    exercise_id = int(data["exercise_id"])
+    async with AsyncSessionLocal() as session:
+        await update_exercise(session, exercise_id=exercise_id, description="")
+        await session.commit()
+    await state.clear()
+    await msg.edit_text("✅ Tavsif o'chirildi.")
+    await cb.answer()
+
+
+# ---------- Exercise delete ----------
+
+
+@router.callback_query(F.data.startswith("ex:delask:"))
+async def cb_ex_delask(cb: CallbackQuery) -> None:
+    if not is_owner_callback(cb):
+        return
+    msg = accessible(cb)
+    if msg is None:
+        return
+    exercise_id = int((cb.data or "").split(":")[-1])
+    await msg.edit_text(
+        "Mashqni o'chirishni tasdiqlaysizmi? Media ham o'chadi.",
+        reply_markup=exercise_delete_confirm(exercise_id),
+    )
+    await cb.answer()
+
+
+@router.callback_query(F.data.startswith("ex:delok:"))
+async def cb_ex_delok(cb: CallbackQuery) -> None:
+    if not is_owner_callback(cb):
+        return
+    msg = accessible(cb)
+    if msg is None:
+        return
+    exercise_id = int((cb.data or "").split(":")[-1])
+    async with AsyncSessionLocal() as session:
+        ex = await get_exercise(session, exercise_id)
+        if ex is None:
+            await cb.answer("Topilmadi", show_alert=True)
+            return
+        await remove_exercise(session, exercise_id=exercise_id)
+        await session.commit()
+    await msg.edit_text("Mashq o'chirildi.")
+    await cb.answer("O'chirildi")
+    return None
+
+
+# ---------- Exercise media management ----------
+
+
+@router.callback_query(F.data.startswith("ex:media:"))
+async def cb_ex_media(cb: CallbackQuery, state: FSMContext) -> None:
+    if not is_owner_callback(cb):
+        return
+    msg = accessible(cb)
+    if msg is None:
+        return
+    await state.clear()
+    exercise_id = int((cb.data or "").split(":")[-1])
+    async with AsyncSessionLocal() as session:
+        ex = await get_exercise(session, exercise_id)
+        if ex is None:
+            await cb.answer("Topilmadi", show_alert=True)
+            return
+        media = await list_exercise_media(session, exercise_id)
+    text = f"<b>🖼 {escape(ex.name)} — media</b>\n\n" f"Jami: <b>{len(media)}</b> ta fayl"
+    await msg.edit_text(text, reply_markup=exercise_media_actions(exercise_id, has_media=bool(media)))
+    await cb.answer()
+
+
+@router.callback_query(F.data.startswith("ex:medadd:"))
+async def cb_ex_medadd(cb: CallbackQuery, state: FSMContext) -> None:
+    if not is_owner_callback(cb):
+        return
+    msg = accessible(cb)
+    if msg is None:
+        return
+    exercise_id = int((cb.data or "").split(":")[-1])
+    await state.set_state(AddExerciseMediaStates.waiting_for_media)
+    await state.update_data(exercise_id=exercise_id)
+    await msg.edit_text(
+        "Rasm/video/animatsiya yuboring. Tugatgach tugmani bosing.",
+        reply_markup=exercise_media_done(exercise_id),
+    )
+    await cb.answer()
+
+
+@router.message(AddExerciseMediaStates.waiting_for_media, F.photo | F.video | F.animation)
+async def m_ex_medadd(message: Message, state: FSMContext) -> None:
+    if not is_owner_message(message):
+        return
+    file_id, file_type = _extract_media(message)
+    if not file_id:
+        return
+    data = await state.get_data()
+    exercise_id = int(data["exercise_id"])
+    async with AsyncSessionLocal() as session:
+        existing = await list_exercise_media(session, exercise_id)
+        await add_exercise_media(
+            session,
+            exercise_id=exercise_id,
+            file_id=file_id,
+            file_type=file_type,
+            order_idx=len(existing),
+        )
+        await session.commit()
+    await message.answer(
+        f"Qabul qilindi. Jami: <b>{len(existing) + 1}</b>",
+        reply_markup=exercise_media_done(exercise_id),
+    )
+
+
+@router.callback_query(F.data.startswith("ex:medfin:"))
+async def cb_ex_medfin(cb: CallbackQuery, state: FSMContext) -> None:
+    if not is_owner_callback(cb):
+        return
+    msg = accessible(cb)
+    if msg is None:
+        return
+    await state.clear()
+    exercise_id = int((cb.data or "").split(":")[-1])
+    async with AsyncSessionLocal() as session:
+        ex = await get_exercise(session, exercise_id)
+        media = await list_exercise_media(session, exercise_id)
+    if ex is None:
+        await cb.answer("Topilmadi", show_alert=True)
+        return
+    parts = [f"<b>📋 {escape(ex.name)}</b>"]
+    if ex.spec:
+        parts.append(f"<i>{escape(ex.spec)}</i>")
+    if ex.description:
+        parts.append("")
+        parts.append(escape(ex.description))
+    parts.append("")
+    parts.append(f"🖼 Media: <b>{len(media)}</b>")
+    parts.append("")
+    parts.append("✅ Media saqlandi.")
+    await msg.edit_text(
+        "\n".join(parts),
+        reply_markup=exercise_detail(exercise_id, ex.workout_id, has_media=bool(media)),
+    )
+    await cb.answer()
+
+
+@router.callback_query(F.data.startswith("ex:medclr:"))
+async def cb_ex_medclr(cb: CallbackQuery, state: FSMContext) -> None:
+    if not is_owner_callback(cb):
+        return
+    msg = accessible(cb)
+    if msg is None:
+        return
+    exercise_id = int((cb.data or "").split(":")[-1])
+    async with AsyncSessionLocal() as session:
+        n = await clear_exercise_media(session, exercise_id)
+        await session.commit()
+    await msg.edit_text(f"🗑 {n} ta media o'chirildi.")
+    await cb.answer()
+
+
+def _extract_media(message: Message) -> tuple[str | None, str]:
+    if message.photo:
+        return message.photo[-1].file_id, MEDIA_PHOTO
+    if message.video:
+        return message.video.file_id, MEDIA_VIDEO
+    if message.animation:
+        return message.animation.file_id, MEDIA_ANIMATION
+    return None, MEDIA_PHOTO
