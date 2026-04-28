@@ -2,10 +2,21 @@
 
 from __future__ import annotations
 
+from datetime import datetime
+
 from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from db.models import AutoReply, Channel, ForwardedFile, PendingVideo
+from db.models import (
+    AutoReply,
+    Channel,
+    ForwardedFile,
+    PendingVideo,
+    Workout,
+    WorkoutMedia,
+    WorkoutReminder,
+    WorkoutSchedule,
+)
 
 # ---------- Channel ----------
 
@@ -197,3 +208,195 @@ async def count_pending(session: AsyncSession) -> int:
 
     row = await session.scalar(select(sa_func.count(PendingVideo.id)))
     return int(row or 0)
+
+
+# ---------- Workout ----------
+
+
+async def add_workout(
+    session: AsyncSession,
+    *,
+    name: str,
+    description: str,
+    created_by: int,
+) -> Workout:
+    row = Workout(name=name, description=description, created_by=created_by, active=True)
+    session.add(row)
+    await session.flush()
+    return row
+
+
+async def get_workout(session: AsyncSession, workout_id: int) -> Workout | None:
+    return await session.get(Workout, workout_id)
+
+
+async def list_workouts(session: AsyncSession) -> list[Workout]:
+    result = await session.scalars(select(Workout).order_by(Workout.id))
+    return list(result.all())
+
+
+async def remove_workout(session: AsyncSession, *, workout_id: int) -> int:
+    await session.execute(delete(WorkoutMedia).where(WorkoutMedia.workout_id == workout_id))
+    await session.execute(delete(WorkoutSchedule).where(WorkoutSchedule.workout_id == workout_id))
+    await session.execute(delete(WorkoutReminder).where(WorkoutReminder.workout_id == workout_id))
+    result = await session.execute(delete(Workout).where(Workout.id == workout_id))
+    return result.rowcount or 0
+
+
+async def update_workout(
+    session: AsyncSession,
+    *,
+    workout_id: int,
+    name: str | None = None,
+    description: str | None = None,
+) -> Workout | None:
+    row = await session.get(Workout, workout_id)
+    if row is None:
+        return None
+    if name is not None:
+        row.name = name
+    if description is not None:
+        row.description = description
+    await session.flush()
+    return row
+
+
+# ---------- WorkoutMedia ----------
+
+
+async def add_workout_media(
+    session: AsyncSession,
+    *,
+    workout_id: int,
+    file_id: str,
+    file_type: str,
+    order_idx: int,
+) -> WorkoutMedia:
+    row = WorkoutMedia(workout_id=workout_id, file_id=file_id, file_type=file_type, order_idx=order_idx)
+    session.add(row)
+    await session.flush()
+    return row
+
+
+async def list_workout_media(session: AsyncSession, workout_id: int) -> list[WorkoutMedia]:
+    result = await session.scalars(
+        select(WorkoutMedia)
+        .where(WorkoutMedia.workout_id == workout_id)
+        .order_by(WorkoutMedia.order_idx, WorkoutMedia.id)
+    )
+    return list(result.all())
+
+
+async def clear_workout_media(session: AsyncSession, workout_id: int) -> int:
+    result = await session.execute(delete(WorkoutMedia).where(WorkoutMedia.workout_id == workout_id))
+    return result.rowcount or 0
+
+
+# ---------- WorkoutSchedule ----------
+
+
+async def add_workout_schedule(
+    session: AsyncSession,
+    *,
+    workout_id: int,
+    days_mask: int,
+    hour: int,
+    minute: int,
+    ack_timeout_min: int,
+) -> WorkoutSchedule:
+    row = WorkoutSchedule(
+        workout_id=workout_id,
+        days_mask=days_mask,
+        hour=hour,
+        minute=minute,
+        ack_timeout_min=ack_timeout_min,
+        active=True,
+    )
+    session.add(row)
+    await session.flush()
+    return row
+
+
+async def get_workout_schedule(session: AsyncSession, schedule_id: int) -> WorkoutSchedule | None:
+    return await session.get(WorkoutSchedule, schedule_id)
+
+
+async def list_schedules_for_workout(session: AsyncSession, workout_id: int) -> list[WorkoutSchedule]:
+    result = await session.scalars(
+        select(WorkoutSchedule)
+        .where(WorkoutSchedule.workout_id == workout_id)
+        .order_by(WorkoutSchedule.hour, WorkoutSchedule.minute)
+    )
+    return list(result.all())
+
+
+async def list_active_schedules(session: AsyncSession) -> list[WorkoutSchedule]:
+    result = await session.scalars(
+        select(WorkoutSchedule).where(WorkoutSchedule.active.is_(True)).order_by(WorkoutSchedule.id)
+    )
+    return list(result.all())
+
+
+async def remove_workout_schedule(session: AsyncSession, *, schedule_id: int) -> int:
+    result = await session.execute(delete(WorkoutSchedule).where(WorkoutSchedule.id == schedule_id))
+    return result.rowcount or 0
+
+
+async def toggle_workout_schedule(session: AsyncSession, *, schedule_id: int) -> WorkoutSchedule | None:
+    row = await session.get(WorkoutSchedule, schedule_id)
+    if row is None:
+        return None
+    row.active = not row.active
+    await session.flush()
+    return row
+
+
+# ---------- WorkoutReminder ----------
+
+
+async def add_workout_reminder(
+    session: AsyncSession,
+    *,
+    schedule_id: int,
+    workout_id: int,
+    chat_id: int,
+    message_id: int | None,
+) -> WorkoutReminder:
+    row = WorkoutReminder(
+        schedule_id=schedule_id,
+        workout_id=workout_id,
+        chat_id=chat_id,
+        message_id=message_id,
+    )
+    session.add(row)
+    await session.flush()
+    return row
+
+
+async def get_workout_reminder(session: AsyncSession, reminder_id: int) -> WorkoutReminder | None:
+    return await session.get(WorkoutReminder, reminder_id)
+
+
+async def update_reminder_status(
+    session: AsyncSession,
+    *,
+    reminder_id: int,
+    status: str,
+    acked_at: datetime | None = None,
+) -> WorkoutReminder | None:
+    row = await session.get(WorkoutReminder, reminder_id)
+    if row is None:
+        return None
+    row.status = status
+    if acked_at is not None:
+        row.acked_at = acked_at
+    await session.flush()
+    return row
+
+
+async def update_reminder_message_id(session: AsyncSession, *, reminder_id: int, message_id: int) -> None:
+    row = await session.get(WorkoutReminder, reminder_id)
+    if row is None:
+        return
+    row.message_id = message_id
+    await session.flush()

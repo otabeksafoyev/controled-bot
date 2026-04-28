@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
-from db.models import AutoReply, Channel
+from db.models import DOW_NAMES_UZ, AutoReply, Channel, Workout, WorkoutSchedule
 
 
 def main_menu(pending_count: int = 0) -> InlineKeyboardMarkup:
@@ -14,6 +14,7 @@ def main_menu(pending_count: int = 0) -> InlineKeyboardMarkup:
             [InlineKeyboardButton(text="📺 Kanallar", callback_data="menu:channels")],
             [InlineKeyboardButton(text=pending_label, callback_data="menu:pending")],
             [InlineKeyboardButton(text="💬 Avtojavoblar", callback_data="menu:replies")],
+            [InlineKeyboardButton(text="💪 Mashqlar", callback_data="menu:workouts")],
             [
                 InlineKeyboardButton(text="⚙️ Holat", callback_data="menu:status"),
                 InlineKeyboardButton(text="📜 So'nggi", callback_data="menu:forwarded"),
@@ -198,3 +199,119 @@ def _pattern_label(pattern: str, pattern_type: str) -> str:
     prefix = "🧩 " if pattern_type == "regex" else ""
     short = pattern if len(pattern) <= 28 else pattern[:25] + "…"
     return f"{prefix}{short}"
+
+
+# -------- Workouts --------
+
+
+def workouts_list(workouts: list[Workout]) -> InlineKeyboardMarkup:
+    rows: list[list[InlineKeyboardButton]] = []
+    for w in workouts:
+        status = "🟢" if w.active else "⚪"
+        label = f"{status} {w.name}"
+        if len(label) > 60:
+            label = label[:57] + "…"
+        rows.append([InlineKeyboardButton(text=label, callback_data=f"wo:view:{w.id}")])
+    rows.append([InlineKeyboardButton(text="➕ Yangi mashq", callback_data="wo:add")])
+    rows.append([InlineKeyboardButton(text="◀️ Bosh menyu", callback_data="menu:main")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def workout_detail(workout_id: int, has_schedules: bool) -> InlineKeyboardMarkup:
+    schedules_label = "📅 Jadvallar" if has_schedules else "📅 Jadval qo'shish"
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text=schedules_label, callback_data=f"wo:scheds:{workout_id}")],
+            [InlineKeyboardButton(text="🗑 Mashqni o'chirish", callback_data=f"wo:delask:{workout_id}")],
+            [InlineKeyboardButton(text="◀️ Mashqlar", callback_data="menu:workouts")],
+        ]
+    )
+
+
+def workout_delete_confirm(workout_id: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(text="✅ Ha, o'chir", callback_data=f"wo:delok:{workout_id}"),
+                InlineKeyboardButton(text="❌ Bekor", callback_data=f"wo:view:{workout_id}"),
+            ]
+        ]
+    )
+
+
+def workout_media_done() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(text="✅ Mediasiz tugatish", callback_data="wo:media:none"),
+                InlineKeyboardButton(text="❌ Bekor", callback_data="wiz:cancel"),
+            ]
+        ]
+    )
+
+
+def workout_media_more() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="✅ Saqlash", callback_data="wo:media:save")],
+            [InlineKeyboardButton(text="❌ Bekor", callback_data="wiz:cancel")],
+        ]
+    )
+
+
+def schedules_list(workout_id: int, schedules: list[WorkoutSchedule]) -> InlineKeyboardMarkup:
+    rows: list[list[InlineKeyboardButton]] = []
+    for s in schedules:
+        days = _days_label(s.days_mask)
+        status = "🟢" if s.active else "⚪"
+        label = f"{status} {days} {s.hour:02d}:{s.minute:02d} ({s.ack_timeout_min}d)"
+        rows.append([InlineKeyboardButton(text=label, callback_data=f"wo:sched:{s.id}")])
+    rows.append([InlineKeyboardButton(text="➕ Yangi jadval", callback_data=f"wo:schedadd:{workout_id}")])
+    rows.append([InlineKeyboardButton(text="◀️ Mashq", callback_data=f"wo:view:{workout_id}")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def schedule_detail(schedule_id: int, workout_id: int, active: bool) -> InlineKeyboardMarkup:
+    toggle_label = "⏸ Pauza qilish" if active else "▶️ Faollashtirish"
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text=toggle_label, callback_data=f"wo:schedtoggle:{schedule_id}")],
+            [InlineKeyboardButton(text="🗑 Jadvalni o'chirish", callback_data=f"wo:scheddel:{schedule_id}")],
+            [InlineKeyboardButton(text="◀️ Jadvallar", callback_data=f"wo:scheds:{workout_id}")],
+        ]
+    )
+
+
+def days_picker(mask: int) -> InlineKeyboardMarkup:
+    """Toggle-buttons for Mon..Sun. Returns kb for current mask state."""
+    rows: list[list[InlineKeyboardButton]] = []
+    row: list[InlineKeyboardButton] = []
+    for i, name in enumerate(DOW_NAMES_UZ):
+        marker = "✅" if mask & (1 << i) else "▫️"
+        row.append(
+            InlineKeyboardButton(
+                text=f"{marker} {name}",
+                callback_data=f"wo:dtoggle:{i}",
+            )
+        )
+        if len(row) == 4:
+            rows.append(row)
+            row = []
+    if row:
+        rows.append(row)
+    rows.append(
+        [
+            InlineKeyboardButton(text="✔️ Tasdiq", callback_data="wo:dconfirm"),
+            InlineKeyboardButton(text="❌ Bekor", callback_data="wiz:cancel"),
+        ]
+    )
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def _days_label(mask: int) -> str:
+    parts = [DOW_NAMES_UZ[i] for i in range(7) if mask & (1 << i)]
+    return ",".join(parts) if parts else "—"
+
+
+def days_label(mask: int) -> str:
+    return _days_label(mask)

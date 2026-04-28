@@ -21,3 +21,15 @@ class PendingStates(StatesGroup):
     waiting_for_search = State()  # anime nom bo'yicha qidirish matni
     waiting_for_anime_id = State()  # qo'lda ID kiritish
     waiting_for_episode = State()  # qism raqami (agar topilmagan bo'lsa)
+
+
+class AddWorkoutStates(StatesGroup):
+    waiting_for_name = State()
+    waiting_for_description = State()
+    waiting_for_media = State()
+
+
+class AddScheduleStates(StatesGroup):
+    waiting_for_days = State()
+    waiting_for_time = State()
+    waiting_for_timeout = State()

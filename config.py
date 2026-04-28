@@ -37,6 +37,11 @@ class Settings(BaseSettings):
     # Anime kesh yangilanish intervali (soniya)
     ANIME_CACHE_TTL: int = 300
 
+    # Mashqlar (workout scheduler)
+    WORKOUT_TZ: str = "Asia/Tashkent"
+    WORKOUT_ACK_TIMEOUT_MIN: int = 10
+    WORKOUT_SNOOZE_MIN: int = 15
+
     LOG_LEVEL: str = Field(default="INFO")
 
 
