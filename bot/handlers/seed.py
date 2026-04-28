@@ -1,28 +1,43 @@
 """Tayyor mashq rejalarini import qilish handlerlari.
 
 'Otabek — Life OS 2026' rejasidan 7 kunlik mashqlar (33 ta element) bir tugma
-bilan DB-ga import qilinadi. Har kun uchun bitta Workout yaratiladi va u
-o'sha kun (single-day mask) jadvaliga ulanishi mumkin.
+bilan DB-ga import qilinadi. Import yakunida foydalanuvchi har kunga vaqt
+(HH:MM) kiritadi va o'sha kun maskali jadval avtomatik yaratiladi.
 """
 
 from __future__ import annotations
 
 import logging
+import re
 from html import escape
 
 from aiogram import F, Router
-from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup
+from aiogram.fsm.context import FSMContext
+from aiogram.types import (
+    CallbackQuery,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    Message,
+)
 
-from bot.common import accessible, is_owner_callback
+from bot.common import accessible, is_owner_callback, is_owner_message
+from bot.services.workout_scheduler import WorkoutScheduler
+from bot.states import ImportTimesStates
+from config import settings
 from db.engine import AsyncSessionLocal
-from db.queries import add_exercise, add_workout, list_workouts
+from db.models import DOW_NAMES_UZ
+from db.queries import (
+    add_exercise,
+    add_workout,
+    add_workout_schedule,
+    list_workouts,
+)
 
 log = logging.getLogger(__name__)
 router = Router(name="seed")
 
-# 7-day plan from Otabek Life OS 2026: each day = (workout_name, description,
-# tip, exercises[]). spec column packed with set/rep/format hints used by the
-# reminder line formatter.
+# 7-day plan: list element index = day-of-week index (0=Du..6=Ya).
+# Tuple: (workout_name, description, tip_id, exercises[]).
 OTABEK_PLAN: list[tuple[str, str, str, list[tuple[str, str, str]]]] = [
     (
         "Du — Ko'krak + Biceps",
@@ -109,6 +124,8 @@ OTABEK_PLAN: list[tuple[str, str, str, list[tuple[str, str, str]]]] = [
     ),
 ]
 
+TIME_RE = re.compile(r"^([01]?\d|2[0-3]):([0-5]\d)$")
+
 
 def import_menu() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
@@ -131,6 +148,19 @@ def import_confirm() -> InlineKeyboardMarkup:
                 InlineKeyboardButton(text="✅ Ha, import qilish", callback_data="seed:otabek:go"),
                 InlineKeyboardButton(text="❌ Bekor", callback_data="menu:workouts"),
             ]
+        ]
+    )
+
+
+def import_time_actions() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(text="⏭ Bu kunni o'tkazish", callback_data="seed:t:skip"),
+            ],
+            [
+                InlineKeyboardButton(text="⛔ Hammasini to'xtatish", callback_data="seed:t:stop"),
+            ],
         ]
     )
 
@@ -166,32 +196,71 @@ async def cb_seed_ask(cb: CallbackQuery) -> None:
     lines.append(f"Jami: <b>{len(OTABEK_PLAN)}</b> kun · <b>{total_ex}</b> mashq")
     lines.append("")
     lines.append(
-        "<i>Eslatma:</i> takror import bo'lmaydi — bir xil nomli kun mashqi mavjud bo'lsa, "
-        "qaytadan qo'shilmaydi."
+        "Import-dan keyin har kunga vaqt (HH:MM) kiritasiz — bot o'sha kun "
+        'uchun jadval ulaydi. Vaqt berishni xohlamasangiz "⏭ O\'tkazish".'
     )
     await msg.edit_text("\n".join(lines), reply_markup=import_confirm())
     await cb.answer()
 
 
+async def _prompt_next_time(msg: Message, state: FSMContext) -> None:
+    """FSM data dan keyingi pending kunni olib HH:MM so'raydi."""
+    data = await state.get_data()
+    pending: list[list[int | str]] = data.get("pending", [])
+    done: int = data.get("done", 0)
+    skipped: int = data.get("skipped", 0)
+    total: int = data.get("total", 0)
+    if not pending:
+        # Wizard tugadi
+        await state.clear()
+        text = [
+            "<b>✅ Import yakunlandi</b>",
+            "",
+            f"➕ Yangi kun: <b>{total}</b>",
+            f"📅 Jadval ulandi: <b>{done}</b>",
+        ]
+        if skipped:
+            text.append(f"⏭ Vaqtsiz qoldirilgan: <b>{skipped}</b>")
+        text.append("")
+        text.append("Keyin xohlasangiz 💪 Mashqlar → kun → 📅 Jadval orqali qo'shasiz.")
+        await msg.answer(
+            "\n".join(text),
+            reply_markup=InlineKeyboardMarkup(
+                inline_keyboard=[[InlineKeyboardButton(text="◀️ Mashqlar", callback_data="menu:workouts")]]
+            ),
+        )
+        return
+    workout_id, day_idx, name = pending[0]
+    progress = done + skipped + 1
+    prompt = (
+        f"<b>⏰ Vaqt kiritish ({progress}/{total})</b>\n\n"
+        f"<b>{escape(str(name))}</b>\n"
+        f"Kun: <b>{DOW_NAMES_UZ[int(day_idx)]}</b>\n\n"
+        "HH:MM formatida vaqt yuboring (masalan: <code>07:00</code> yoki <code>19:30</code>).\n"
+        "Vaqt kerak bo'lmasa pastdagi tugmani bosing."
+    )
+    await msg.answer(prompt, reply_markup=import_time_actions())
+
+
 @router.callback_query(F.data == "seed:otabek:go")
-async def cb_seed_go(cb: CallbackQuery) -> None:
+async def cb_seed_go(cb: CallbackQuery, state: FSMContext) -> None:
     if not is_owner_callback(cb):
         return
     msg = accessible(cb)
     if msg is None:
         return
     owner_id = cb.from_user.id if cb.from_user else 0
-    created_workouts = 0
+    created: list[list[int | str]] = []  # [[workout_id, day_idx, name], ...]
     skipped_workouts = 0
     created_exs = 0
     async with AsyncSessionLocal() as session:
         existing = {w.name for w in await list_workouts(session)}
-        for name, desc, _, exs in OTABEK_PLAN:
+        for day_idx, (name, desc, _, exs) in enumerate(OTABEK_PLAN):
             if name in existing:
                 skipped_workouts += 1
                 continue
             workout = await add_workout(session, name=name, description=desc, created_by=owner_id)
-            created_workouts += 1
+            created.append([workout.id, day_idx, name])
             for idx, (ex_name, spec, ex_desc) in enumerate(exs):
                 await add_exercise(
                     session,
@@ -204,26 +273,137 @@ async def cb_seed_go(cb: CallbackQuery) -> None:
                 created_exs += 1
         await session.commit()
 
-    text = [
-        "<b>✅ Import yakunlandi</b>",
+    intro = [
+        "<b>✅ Mashqlar qo'shildi</b>",
         "",
-        f"➕ Yangi kun: <b>{created_workouts}</b>",
+        f"➕ Yangi kun: <b>{len(created)}</b>",
         f"➕ Yangi mashq: <b>{created_exs}</b>",
     ]
     if skipped_workouts:
-        text.append(f"⏭ O'tkazilgan (mavjud): <b>{skipped_workouts}</b>")
-    text.append("")
-    text.append(
-        "Endi 💪 Mashqlar yoki 📆 Hafta rejasi orqali kun ustiga bosib, "
-        "har biriga jadval (HH:MM) va media qo'shing."
-    )
+        intro.append(f"⏭ O'tkazilgan kun (mavjud edi): <b>{skipped_workouts}</b>")
+    intro.append("")
+    if created:
+        intro.append("Endi har kun uchun vaqt (HH:MM) kiritasiz — bot eslatib turadi.")
+    else:
+        intro.append("Hech qanday yangi kun qo'shilmadi (hammasi mavjud).")
     await msg.edit_text(
+        "\n".join(intro),
+        reply_markup=InlineKeyboardMarkup(
+            inline_keyboard=[[InlineKeyboardButton(text="◀️ Mashqlar", callback_data="menu:workouts")]]
+        ),
+    )
+
+    if not created:
+        await cb.answer("Import yakunlandi")
+        return
+
+    await state.set_state(ImportTimesStates.waiting_for_time)
+    await state.set_data(
+        {
+            "pending": created,
+            "done": 0,
+            "skipped": 0,
+            "total": len(created),
+        }
+    )
+    await _prompt_next_time(msg, state)
+    await cb.answer("Vaqt kiriting")
+
+
+@router.message(ImportTimesStates.waiting_for_time)
+async def m_import_time(message: Message, state: FSMContext, scheduler: WorkoutScheduler) -> None:
+    if not is_owner_message(message):
+        return
+    raw = (message.text or "").strip()
+    m = TIME_RE.match(raw)
+    if not m:
+        await message.answer(
+            "❌ Vaqt format xato. <code>HH:MM</code> ko'rinishida yuboring " "(masalan: <code>07:00</code>).",
+            reply_markup=import_time_actions(),
+        )
+        return
+    hour = int(m.group(1))
+    minute = int(m.group(2))
+    data = await state.get_data()
+    pending: list[list[int | str]] = list(data.get("pending", []))
+    if not pending:
+        await state.clear()
+        return
+    workout_id_raw, day_idx_raw, _name = pending[0]
+    workout_id = int(workout_id_raw)
+    day_idx = int(day_idx_raw)
+    days_mask = 1 << day_idx
+    timeout = settings.WORKOUT_ACK_TIMEOUT_MIN
+    async with AsyncSessionLocal() as session:
+        sch = await add_workout_schedule(
+            session,
+            workout_id=workout_id,
+            days_mask=days_mask,
+            hour=hour,
+            minute=minute,
+            ack_timeout_min=timeout,
+        )
+        await session.commit()
+        scheduler.add_schedule(sch)
+    await state.update_data(
+        pending=pending[1:],
+        done=int(data.get("done", 0)) + 1,
+        skipped=int(data.get("skipped", 0)),
+        total=int(data.get("total", 0)),
+    )
+    await message.answer(f"✅ {DOW_NAMES_UZ[day_idx]} {hour:02d}:{minute:02d} ulandi.")
+    await _prompt_next_time(message, state)
+
+
+@router.callback_query(ImportTimesStates.waiting_for_time, F.data == "seed:t:skip")
+async def cb_import_skip(cb: CallbackQuery, state: FSMContext) -> None:
+    if not is_owner_callback(cb):
+        return
+    msg = accessible(cb)
+    if msg is None:
+        return
+    data = await state.get_data()
+    pending: list[list[int | str]] = list(data.get("pending", []))
+    if not pending:
+        await state.clear()
+        await cb.answer()
+        return
+    await state.update_data(
+        pending=pending[1:],
+        done=int(data.get("done", 0)),
+        skipped=int(data.get("skipped", 0)) + 1,
+        total=int(data.get("total", 0)),
+    )
+    await cb.answer("O'tkazildi")
+    await _prompt_next_time(msg, state)
+
+
+@router.callback_query(ImportTimesStates.waiting_for_time, F.data == "seed:t:stop")
+async def cb_import_stop(cb: CallbackQuery, state: FSMContext) -> None:
+    if not is_owner_callback(cb):
+        return
+    msg = accessible(cb)
+    if msg is None:
+        return
+    data = await state.get_data()
+    pending: list[list[int | str]] = list(data.get("pending", []))
+    skipped_now = len(pending)
+    await state.clear()
+    text = [
+        "<b>⛔ Vaqt kiritish to'xtatildi</b>",
+        "",
+        f"📅 Jadval ulandi: <b>{int(data.get('done', 0))}</b>",
+        f"⏭ Vaqtsiz qolgan: <b>{int(data.get('skipped', 0)) + skipped_now}</b>",
+        "",
+        "Keyin xohlasangiz 💪 Mashqlar → kun → 📅 Jadval orqali qo'shasiz.",
+    ]
+    await msg.answer(
         "\n".join(text),
         reply_markup=InlineKeyboardMarkup(
             inline_keyboard=[[InlineKeyboardButton(text="◀️ Mashqlar", callback_data="menu:workouts")]]
         ),
     )
-    await cb.answer("Import yakunlandi")
+    await cb.answer("To'xtatildi")
 
 
 __all__ = ["router", "OTABEK_PLAN"]

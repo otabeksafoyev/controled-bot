@@ -54,6 +54,12 @@ class AddExerciseMediaStates(StatesGroup):
     waiting_for_media = State()
 
 
+class ImportTimesStates(StatesGroup):
+    """Import-dan keyin har kunga vaqt biriktirish wizard."""
+
+    waiting_for_time = State()
+
+
 class WeekDayAddStates(StatesGroup):
     """Adding a workout to a specific day from the weekly view."""
 
