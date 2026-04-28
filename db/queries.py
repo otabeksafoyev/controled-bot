@@ -400,3 +400,15 @@ async def update_reminder_message_id(session: AsyncSession, *, reminder_id: int,
         return
     row.message_id = message_id
     await session.flush()
+
+
+async def list_schedules_with_workouts(
+    session: AsyncSession,
+) -> list[tuple[WorkoutSchedule, Workout]]:
+    """Return (schedule, workout) tuples for ALL schedules (active + paused)."""
+    result = await session.execute(
+        select(WorkoutSchedule, Workout)
+        .join(Workout, WorkoutSchedule.workout_id == Workout.id)
+        .order_by(WorkoutSchedule.hour, WorkoutSchedule.minute)
+    )
+    return [(row[0], row[1]) for row in result.all()]

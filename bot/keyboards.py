@@ -14,7 +14,10 @@ def main_menu(pending_count: int = 0) -> InlineKeyboardMarkup:
             [InlineKeyboardButton(text="📺 Kanallar", callback_data="menu:channels")],
             [InlineKeyboardButton(text=pending_label, callback_data="menu:pending")],
             [InlineKeyboardButton(text="💬 Avtojavoblar", callback_data="menu:replies")],
-            [InlineKeyboardButton(text="💪 Mashqlar", callback_data="menu:workouts")],
+            [
+                InlineKeyboardButton(text="💪 Mashqlar", callback_data="menu:workouts"),
+                InlineKeyboardButton(text="📆 Hafta rejasi", callback_data="menu:week"),
+            ],
             [
                 InlineKeyboardButton(text="⚙️ Holat", callback_data="menu:status"),
                 InlineKeyboardButton(text="📜 So'nggi", callback_data="menu:forwarded"),
@@ -315,3 +318,48 @@ def _days_label(mask: int) -> str:
 
 def days_label(mask: int) -> str:
     return _days_label(mask)
+
+
+# -------- Weekly plan --------
+
+
+def week_overview(counts: list[int]) -> InlineKeyboardMarkup:
+    """Show 7 day buttons in the week. counts[i] = #schedules attached to day i (Mon-Sun)."""
+    rows: list[list[InlineKeyboardButton]] = []
+    for i, name in enumerate(DOW_NAMES_UZ):
+        n = counts[i] if i < len(counts) else 0
+        label = f"{name} ({n})" if n else name
+        rows.append([InlineKeyboardButton(text=label, callback_data=f"week:day:{i}")])
+    rows.append([InlineKeyboardButton(text="◀️ Bosh menyu", callback_data="menu:main")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def week_day_view(
+    day_idx: int,
+    items: list[tuple[WorkoutSchedule, Workout]],
+) -> InlineKeyboardMarkup:
+    rows: list[list[InlineKeyboardButton]] = []
+    for sch, w in items:
+        status = "🟢" if sch.active else "⚪"
+        label = f"{status} {sch.hour:02d}:{sch.minute:02d} — {w.name}"
+        if len(label) > 60:
+            label = label[:57] + "…"
+        rows.append([InlineKeyboardButton(text=label, callback_data=f"wo:sched:{sch.id}")])
+    rows.append([InlineKeyboardButton(text="➕ Mashq ulash", callback_data=f"week:add:{day_idx}")])
+    rows.append([InlineKeyboardButton(text="◀️ Hafta", callback_data="menu:week")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def workout_picker(workouts: list[Workout], day_idx: int, *, allow_new: bool = True) -> InlineKeyboardMarkup:
+    rows: list[list[InlineKeyboardButton]] = []
+    for w in workouts:
+        label = f"💪 {w.name}"
+        if len(label) > 60:
+            label = label[:57] + "…"
+        rows.append([InlineKeyboardButton(text=label, callback_data=f"week:pick:{day_idx}:{w.id}")])
+    if allow_new:
+        rows.append(
+            [InlineKeyboardButton(text="➕ Yangi mashq qo'shish", callback_data=f"week:newwo:{day_idx}")]
+        )
+    rows.append([InlineKeyboardButton(text="◀️ Kun", callback_data=f"week:day:{day_idx}")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)

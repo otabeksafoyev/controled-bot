@@ -33,3 +33,13 @@ class AddScheduleStates(StatesGroup):
     waiting_for_days = State()
     waiting_for_time = State()
     waiting_for_timeout = State()
+
+
+class WeekDayAddStates(StatesGroup):
+    """Adding a workout to a specific day from the weekly view."""
+
+    waiting_for_new_name = State()
+    waiting_for_new_description = State()
+    waiting_for_new_media = State()
+    waiting_for_time = State()
+    waiting_for_timeout = State()

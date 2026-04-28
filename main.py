@@ -14,6 +14,7 @@ from bot.handlers import channels as channels_handlers
 from bot.handlers import menu as menu_handlers
 from bot.handlers import pending as pending_handlers
 from bot.handlers import replies as replies_handlers
+from bot.handlers import week as week_handlers
 from bot.handlers import workouts as workouts_handlers
 from bot.services.workout_scheduler import WorkoutScheduler
 from config import settings
@@ -70,6 +71,7 @@ async def _run() -> None:
     dp.include_router(pending_handlers.router)
     dp.include_router(replies_handlers.router)
     dp.include_router(workouts_handlers.router)
+    dp.include_router(week_handlers.router)
 
     stop_event = asyncio.Event()
 
