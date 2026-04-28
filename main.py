@@ -14,8 +14,10 @@ from bot.handlers import channels as channels_handlers
 from bot.handlers import menu as menu_handlers
 from bot.handlers import pending as pending_handlers
 from bot.handlers import replies as replies_handlers
+from bot.handlers import workouts as workouts_handlers
+from bot.services.workout_scheduler import WorkoutScheduler
 from config import settings
-from db.engine import engine
+from db.engine import AsyncSessionLocal, engine
 from db.migrations import migrate_rules_to_channels
 from db.models import Base
 from userbot.client import build_client
@@ -58,10 +60,16 @@ async def _run() -> None:
             "KAWORAI_DATABASE_URL bo'sh — anime avto-matching o'chiq, " "barcha videolar pending-ga tushadi"
         )
 
+    workout_scheduler = WorkoutScheduler(
+        bot=bot, session_factory=AsyncSessionLocal, owner_id=settings.OWNER_ID
+    )
+    await workout_scheduler.start()
+
     dp.include_router(menu_handlers.router)
     dp.include_router(channels_handlers.router)
     dp.include_router(pending_handlers.router)
     dp.include_router(replies_handlers.router)
+    dp.include_router(workouts_handlers.router)
 
     stop_event = asyncio.Event()
 
@@ -74,7 +82,7 @@ async def _run() -> None:
             loop.add_signal_handler(sig, _stop)
 
     async def _run_bot(bot_instance: Bot) -> None:
-        await dp.start_polling(bot_instance, userbot=userbot)
+        await dp.start_polling(bot_instance, userbot=userbot, scheduler=workout_scheduler)
 
     bot_task = asyncio.create_task(_run_bot(bot), name="control-bot")
     ub_task = asyncio.create_task(userbot.run_until_disconnected(), name="userbot")  # type: ignore[arg-type]
@@ -84,6 +92,7 @@ async def _run() -> None:
     log.info("Shutting down (task done: %s)", [t.get_name() for t in done])
 
     await dp.stop_polling()
+    await workout_scheduler.shutdown()
     await bot.session.close()
     if userbot.is_connected():
         await userbot.disconnect()  # type: ignore[func-returns-value]
