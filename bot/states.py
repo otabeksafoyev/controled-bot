@@ -35,6 +35,25 @@ class AddScheduleStates(StatesGroup):
     waiting_for_timeout = State()
 
 
+class AddExerciseStates(StatesGroup):
+    """Mashq ichiga element qo'shish wizard."""
+
+    waiting_for_name = State()
+    waiting_for_spec = State()
+    waiting_for_description = State()
+    waiting_for_media = State()
+
+
+class EditExerciseStates(StatesGroup):
+    waiting_for_name = State()
+    waiting_for_spec = State()
+    waiting_for_description = State()
+
+
+class AddExerciseMediaStates(StatesGroup):
+    waiting_for_media = State()
+
+
 class WeekDayAddStates(StatesGroup):
     """Adding a workout to a specific day from the weekly view."""
 

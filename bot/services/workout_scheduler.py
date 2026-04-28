@@ -34,6 +34,8 @@ from db.queries import (
     get_workout_reminder,
     get_workout_schedule,
     list_active_schedules,
+    list_exercise_media,
+    list_exercises,
     list_workout_media,
     update_reminder_message_id,
     update_reminder_status,
@@ -150,6 +152,16 @@ class WorkoutScheduler:
                 if workout is None or not workout.active:
                     return
                 media = await list_workout_media(session, workout.id)
+                exercises = await list_exercises(session, workout.id)
+                exercise_payload: list[tuple[str, list[tuple[str, str]]]] = []
+                for ex in exercises:
+                    ex_media = await list_exercise_media(session, ex.id)
+                    exercise_payload.append(
+                        (
+                            _format_exercise_line(ex.name, ex.spec),
+                            [(m.file_id, m.file_type) for m in ex_media],
+                        )
+                    )
                 reminder = await add_workout_reminder(
                     session,
                     schedule_id=schedule.id,
@@ -163,7 +175,11 @@ class WorkoutScheduler:
                 workout_desc = workout.description
                 ack_timeout = schedule.ack_timeout_min
 
-            text = _format_workout_text_safe(workout_name, workout_desc)
+            text = _format_workout_text_safe(
+                workout_name,
+                workout_desc,
+                [line for line, _ in exercise_payload],
+            )
             kb = _ack_keyboard(reminder_id)
 
             sent_message_id: int | None = None
@@ -205,6 +221,20 @@ class WorkoutScheduler:
                 else:
                     msg = await self.bot.send_message(self.owner_id, text, reply_markup=kb)
                     sent_message_id = msg.message_id
+
+                # Send each exercise's media as follow-ups (caption = exercise line).
+                for ex_line, ex_media_pairs in exercise_payload:
+                    for idx, (file_id, file_type) in enumerate(ex_media_pairs):
+                        caption = ex_line if idx == 0 else None
+                        try:
+                            if file_type == MEDIA_VIDEO:
+                                await self.bot.send_video(self.owner_id, file_id, caption=caption)
+                            elif file_type == MEDIA_ANIMATION:
+                                await self.bot.send_animation(self.owner_id, file_id, caption=caption)
+                            else:
+                                await self.bot.send_photo(self.owner_id, file_id, caption=caption)
+                        except TelegramAPIError:
+                            log.exception("Failed to send exercise media for workout %d", workout.id)
             except TelegramAPIError:
                 log.exception("Failed to send reminder for schedule %d", schedule_id)
 
@@ -262,7 +292,15 @@ class WorkoutScheduler:
             log.exception("_fire_scold crashed for reminder_id=%s", reminder_id)
 
 
-def _format_workout_text_safe(name: str, description: str) -> str:
+def _format_exercise_line(name: str, spec: str) -> str:
+    """Single exercise summary line for reminder message."""
+    from html import escape
+
+    spec_part = f" — <i>{escape(spec)}</i>" if spec else ""
+    return f"<b>{escape(name)}</b>{spec_part}"
+
+
+def _format_workout_text_safe(name: str, description: str, exercises: list[str] | None = None) -> str:
     """HTML-safe formatter (without DB session)."""
     from html import escape
 
@@ -270,6 +308,11 @@ def _format_workout_text_safe(name: str, description: str) -> str:
     if description:
         parts.append("")
         parts.append(escape(description))
+    if exercises:
+        parts.append("")
+        parts.append("<b>📋 Mashqlar:</b>")
+        for i, line in enumerate(exercises, start=1):
+            parts.append(f"{i}. {line}")
     parts.append("")
     parts.append("<i>Vaqtida javob bermasangiz — tanbex bor!</i>")
     return "\n".join(parts)

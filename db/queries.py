@@ -10,6 +10,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from db.models import (
     AutoReply,
     Channel,
+    Exercise,
+    ExerciseMedia,
     ForwardedFile,
     PendingVideo,
     Workout,
@@ -236,6 +238,13 @@ async def list_workouts(session: AsyncSession) -> list[Workout]:
 
 
 async def remove_workout(session: AsyncSession, *, workout_id: int) -> int:
+    ex_ids = [
+        row[0]
+        for row in (await session.execute(select(Exercise.id).where(Exercise.workout_id == workout_id))).all()
+    ]
+    if ex_ids:
+        await session.execute(delete(ExerciseMedia).where(ExerciseMedia.exercise_id.in_(ex_ids)))
+        await session.execute(delete(Exercise).where(Exercise.id.in_(ex_ids)))
     await session.execute(delete(WorkoutMedia).where(WorkoutMedia.workout_id == workout_id))
     await session.execute(delete(WorkoutSchedule).where(WorkoutSchedule.workout_id == workout_id))
     await session.execute(delete(WorkoutReminder).where(WorkoutReminder.workout_id == workout_id))
@@ -412,3 +421,102 @@ async def list_schedules_with_workouts(
         .order_by(WorkoutSchedule.hour, WorkoutSchedule.minute)
     )
     return [(row[0], row[1]) for row in result.all()]
+
+
+# ---------- Exercise ----------
+
+
+async def add_exercise(
+    session: AsyncSession,
+    *,
+    workout_id: int,
+    name: str,
+    spec: str = "",
+    description: str = "",
+    order_idx: int | None = None,
+) -> Exercise:
+    if order_idx is None:
+        existing = await session.scalars(select(Exercise.order_idx).where(Exercise.workout_id == workout_id))
+        vals = list(existing.all())
+        order_idx = (max(vals) + 1) if vals else 0
+    row = Exercise(
+        workout_id=workout_id,
+        name=name,
+        spec=spec,
+        description=description,
+        order_idx=order_idx,
+    )
+    session.add(row)
+    await session.flush()
+    return row
+
+
+async def get_exercise(session: AsyncSession, exercise_id: int) -> Exercise | None:
+    return await session.get(Exercise, exercise_id)
+
+
+async def list_exercises(session: AsyncSession, workout_id: int) -> list[Exercise]:
+    result = await session.scalars(
+        select(Exercise).where(Exercise.workout_id == workout_id).order_by(Exercise.order_idx, Exercise.id)
+    )
+    return list(result.all())
+
+
+async def update_exercise(
+    session: AsyncSession,
+    *,
+    exercise_id: int,
+    name: str | None = None,
+    spec: str | None = None,
+    description: str | None = None,
+) -> Exercise | None:
+    row = await session.get(Exercise, exercise_id)
+    if row is None:
+        return None
+    if name is not None:
+        row.name = name
+    if spec is not None:
+        row.spec = spec
+    if description is not None:
+        row.description = description
+    await session.flush()
+    return row
+
+
+async def remove_exercise(session: AsyncSession, *, exercise_id: int) -> int:
+    await session.execute(delete(ExerciseMedia).where(ExerciseMedia.exercise_id == exercise_id))
+    result = await session.execute(delete(Exercise).where(Exercise.id == exercise_id))
+    return result.rowcount or 0
+
+
+async def add_exercise_media(
+    session: AsyncSession,
+    *,
+    exercise_id: int,
+    file_id: str,
+    file_type: str,
+    order_idx: int = 0,
+) -> ExerciseMedia:
+    row = ExerciseMedia(
+        exercise_id=exercise_id,
+        file_id=file_id,
+        file_type=file_type,
+        order_idx=order_idx,
+    )
+    session.add(row)
+    await session.flush()
+    return row
+
+
+async def list_exercise_media(session: AsyncSession, exercise_id: int) -> list[ExerciseMedia]:
+    result = await session.scalars(
+        select(ExerciseMedia)
+        .where(ExerciseMedia.exercise_id == exercise_id)
+        .order_by(ExerciseMedia.order_idx, ExerciseMedia.id)
+    )
+    return list(result.all())
+
+
+async def clear_exercise_media(session: AsyncSession, exercise_id: int) -> int:
+    result = await session.execute(delete(ExerciseMedia).where(ExerciseMedia.exercise_id == exercise_id))
+    return result.rowcount or 0
