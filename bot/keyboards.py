@@ -281,6 +281,11 @@ def schedule_detail(schedule_id: int, workout_id: int, active: bool) -> InlineKe
     toggle_label = "⏸ Pauza qilish" if active else "▶️ Faollashtirish"
     return InlineKeyboardMarkup(
         inline_keyboard=[
+            [
+                InlineKeyboardButton(text="🕒 Vaqt", callback_data=f"wo:schededtime:{schedule_id}"),
+                InlineKeyboardButton(text="⏱ Timeout", callback_data=f"wo:schededto:{schedule_id}"),
+            ],
+            [InlineKeyboardButton(text="📅 Kunlar", callback_data=f"wo:schededdays:{schedule_id}")],
             [InlineKeyboardButton(text=toggle_label, callback_data=f"wo:schedtoggle:{schedule_id}")],
             [InlineKeyboardButton(text="🗑 Jadvalni o'chirish", callback_data=f"wo:scheddel:{schedule_id}")],
             [InlineKeyboardButton(text="◀️ Jadvallar", callback_data=f"wo:scheds:{workout_id}")],

@@ -60,6 +60,14 @@ class ImportTimesStates(StatesGroup):
     waiting_for_time = State()
 
 
+class EditScheduleStates(StatesGroup):
+    """Mavjud jadvalni tahrirlash (vaqt yoki timeout)."""
+
+    waiting_for_time = State()
+    waiting_for_timeout = State()
+    waiting_for_days = State()
+
+
 class WeekDayAddStates(StatesGroup):
     """Adding a workout to a specific day from the weekly view."""
 

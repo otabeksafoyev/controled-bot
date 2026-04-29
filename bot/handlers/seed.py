@@ -124,6 +124,79 @@ OTABEK_PLAN: list[tuple[str, str, str, list[tuple[str, str, str]]]] = [
     ),
 ]
 
+
+# Yuz mashqlari (face yoga / mimika) — kunlik preset.
+# Workout sifatida 1 ta kun yaratiladi; foydalanuvchi kunlar va vaqtni o'zi
+# ulaydi (umumiy AddSchedule wizard orqali).
+FACE_PLAN_NAME = "Yuz mashqlari (kunlik)"
+FACE_PLAN_DESC = (
+    "Yuz mushaklari uchun kunlik kompleks. Ertalab yoki kechqurun, oyna "
+    "oldida 10-12 daqiqa. Har mashqda nafasni teng saqlash, mushaklarni "
+    "to'liq ishlatish."
+)
+FACE_PLAN_EXERCISES: list[tuple[str, str, str]] = [
+    (
+        "Issiq isitish (artish)",
+        "1×60s",
+        "Yuzni ikki kaft bilan astoydil ishqalab isiting (10-15 sek). Keyin barmoqlar bilan yuz, jag', bo'yinni aylanma harakatlar bilan uqalang.",
+    ),
+    (
+        "Peshona silliqlash",
+        "3×15",
+        "Barmoqlarni peshonaga qo'yib, qoshlardan sochga tomon yuqoriga sekin tortib silliqlang. Ajinlarga qarshi.",
+    ),
+    (
+        "Qosh ko'tarish (Surprised)",
+        "3×15",
+        "Ko'rsatkich barmoqlarni qoshlarga qo'ying. Qoshlarni yuqoriga ko'tarishga harakat qiling, barmoqlar pastga bosib qarshilik qilsin.",
+    ),
+    (
+        "Ko'z ostini mustahkamlash",
+        "3×20",
+        "Pastki qovoqni quyidan yumib-ochib turing (yuqori qovoq qimirlamasin). Ko'z ostidagi mushaklarga.",
+    ),
+    (
+        "Lunj puflash (Cheek Puff)",
+        "3×10",
+        "Og'izni yopib, lunjlarni to'liq puflang. 10 sek ushlang. Havoni o'ng-chap lunjga almashtirib o'tkazing.",
+    ),
+    (
+        "Lunj ko'tarish (Smile Lift)",
+        "3×20",
+        "Lablarni yopiq holatda kuchli tabassum qiling. Og'iz burchaklarini yuqoriga ko'tarib 5 sek ushlang.",
+    ),
+    (
+        "'O' va 'E' (Lip Pucker)",
+        "3×20",
+        "Lablarni 'O' shakliga cho'zing — 3 sek ushlang. So'ng 'E' shakliga torting (tishlar ko'rinsin) — 3 sek.",
+    ),
+    (
+        "Baliq lablari (Fish Lips)",
+        "3×30s",
+        "Lunjlarni ichkariga tortib, lablarni baliqdek cho'zing. Tabassum qilib 30 sek ushlang.",
+    ),
+    (
+        "Til cho'zish (Lion Tongue)",
+        "3×10",
+        "Og'izni keng oching, tilni iyak tomon maksimal cho'zing. 10 sek ushlang.",
+    ),
+    (
+        "Jag' itarish (Jaw Jut)",
+        "3×15",
+        "Pastki jag'ni oldinga itaring va bir oz yuqoriga. Bo'yin va iyak ostidagi mushaklarga.",
+    ),
+    (
+        "Bo'yin cho'zish (Neck Stretch)",
+        "3×30s",
+        "Boshni orqaga tashlang, lablar bilan shipga 'o'pkichoq' yuborgandek cho'zing. 30 sek.",
+    ),
+    (
+        "Yuz havo ostida ushlash",
+        "3×30s",
+        "Burundan chuqur nafas oling, og'izni puflab 30 sek tutib turing — yonoqlar puflangan, peshona bo'shashgan.",
+    ),
+]
+
 TIME_RE = re.compile(r"^([01]?\d|2[0-3]):([0-5]\d)$")
 
 
@@ -132,11 +205,28 @@ def import_menu() -> InlineKeyboardMarkup:
         inline_keyboard=[
             [
                 InlineKeyboardButton(
-                    text="📥 Otabek hafta rejasini import qilish",
+                    text="📥 Otabek hafta rejasi (7 kun)",
                     callback_data="seed:otabek:ask",
                 )
             ],
+            [
+                InlineKeyboardButton(
+                    text="👁 Yuz mashqlari (kunlik)",
+                    callback_data="seed:face:ask",
+                )
+            ],
             [InlineKeyboardButton(text="◀️ Mashqlar", callback_data="menu:workouts")],
+        ]
+    )
+
+
+def face_confirm() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(text="✅ Ha, import qilish", callback_data="seed:face:go"),
+                InlineKeyboardButton(text="❌ Bekor", callback_data="wo:import"),
+            ]
         ]
     )
 
@@ -406,4 +496,85 @@ async def cb_import_stop(cb: CallbackQuery, state: FSMContext) -> None:
     await cb.answer("To'xtatildi")
 
 
-__all__ = ["router", "OTABEK_PLAN"]
+# ---------- Face plan ----------
+
+
+@router.callback_query(F.data == "seed:face:ask")
+async def cb_face_ask(cb: CallbackQuery) -> None:
+    if not is_owner_callback(cb):
+        return
+    msg = accessible(cb)
+    if msg is None:
+        return
+    lines = [
+        f"<b>👁 {escape(FACE_PLAN_NAME)}</b>",
+        "",
+        escape(FACE_PLAN_DESC),
+        "",
+        f"Mashqlar soni: <b>{len(FACE_PLAN_EXERCISES)}</b>",
+        "",
+        "Import qilamizmi? Keyin 💪 Mashqlar → "
+        + escape(FACE_PLAN_NAME)
+        + " → 📅 Jadval orqali kunlar/vaqt biriktirasiz.",
+    ]
+    await msg.edit_text("\n".join(lines), reply_markup=face_confirm())
+    await cb.answer()
+
+
+@router.callback_query(F.data == "seed:face:go")
+async def cb_face_go(cb: CallbackQuery) -> None:
+    if not is_owner_callback(cb):
+        return
+    msg = accessible(cb)
+    if msg is None:
+        return
+    owner_id = cb.from_user.id if cb.from_user else 0
+    async with AsyncSessionLocal() as session:
+        existing = {w.name for w in await list_workouts(session)}
+        if FACE_PLAN_NAME in existing:
+            await msg.edit_text(
+                f"⏭ <b>{escape(FACE_PLAN_NAME)}</b> allaqachon mavjud — qaytadan import qilinmadi.",
+                reply_markup=InlineKeyboardMarkup(
+                    inline_keyboard=[[InlineKeyboardButton(text="◀️ Mashqlar", callback_data="menu:workouts")]]
+                ),
+            )
+            await cb.answer("Mavjud edi")
+            return
+        workout = await add_workout(
+            session,
+            name=FACE_PLAN_NAME,
+            description=FACE_PLAN_DESC,
+            created_by=owner_id,
+        )
+        for idx, (ex_name, spec, ex_desc) in enumerate(FACE_PLAN_EXERCISES):
+            await add_exercise(
+                session,
+                workout_id=workout.id,
+                name=ex_name,
+                spec=spec,
+                description=ex_desc,
+                order_idx=idx,
+            )
+        await session.commit()
+        new_id = workout.id
+
+    text = [
+        f"<b>✅ {escape(FACE_PLAN_NAME)} qo'shildi</b>",
+        "",
+        f"➕ Yangi mashqlar: <b>{len(FACE_PLAN_EXERCISES)}</b>",
+        "",
+        "Endi kun(lar) va vaqt(lar)ni biriktiring.",
+    ]
+    await msg.edit_text(
+        "\n".join(text),
+        reply_markup=InlineKeyboardMarkup(
+            inline_keyboard=[
+                [InlineKeyboardButton(text="📅 Jadval qo'shish", callback_data=f"wo:schedadd:{new_id}")],
+                [InlineKeyboardButton(text="◀️ Mashqlar", callback_data="menu:workouts")],
+            ]
+        ),
+    )
+    await cb.answer("Import qilindi")
+
+
+__all__ = ["router", "OTABEK_PLAN", "FACE_PLAN_NAME", "FACE_PLAN_EXERCISES"]

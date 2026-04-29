@@ -37,6 +37,7 @@ from bot.states import (
     AddScheduleStates,
     AddWorkoutStates,
     EditExerciseStates,
+    EditScheduleStates,
 )
 from db.engine import AsyncSessionLocal
 from db.models import (
@@ -46,6 +47,7 @@ from db.models import (
     REM_DONE,
     REM_PENDING,
     REM_SKIPPED,
+    WorkoutSchedule,
 )
 from db.queries import (
     add_exercise,
@@ -69,6 +71,7 @@ from db.queries import (
     toggle_workout_schedule,
     update_exercise,
     update_reminder_status,
+    update_workout_schedule,
 )
 
 log = logging.getLogger(__name__)
@@ -539,6 +542,202 @@ async def cb_sched_del(cb: CallbackQuery, scheduler: WorkoutScheduler, state: FS
     else:
         text = f"<b>📅 Jadvallar — {escape(workout.name)}</b>\n\nJami: <b>{len(scheds)}</b>"
     await msg.edit_text(text, reply_markup=schedules_list(workout_id, scheds))
+
+
+# ---------- Schedule edit (time / timeout / days) ----------
+
+
+def _format_schedule_text(workout_name: str, sch: WorkoutSchedule) -> str:
+    return (
+        f"<b>📅 Jadval</b>\n\n"
+        f"Mashq: <b>{escape(workout_name)}</b>\n"
+        f"Kunlar: <b>{days_label(sch.days_mask)}</b>\n"
+        f"Vaqt: <b>{sch.hour:02d}:{sch.minute:02d}</b>\n"
+        f"Javob kutish: <b>{sch.ack_timeout_min} daq</b>\n"
+        f"Holati: <b>{'faol' if sch.active else 'pauza'}</b>"
+    )
+
+
+@router.callback_query(F.data.startswith("wo:schededtime:"))
+async def cb_sched_edit_time(cb: CallbackQuery, state: FSMContext) -> None:
+    if not is_owner_callback(cb):
+        return
+    msg = accessible(cb)
+    if msg is None:
+        return
+    schedule_id = int((cb.data or "").split(":")[-1])
+    async with AsyncSessionLocal() as session:
+        sch = await get_workout_schedule(session, schedule_id)
+        if sch is None:
+            await cb.answer("Topilmadi", show_alert=True)
+            return
+    await state.set_state(EditScheduleStates.waiting_for_time)
+    await state.update_data(schedule_id=schedule_id)
+    await msg.answer(
+        f"🕒 Yangi vaqt yuboring (HH:MM).\n" f"Joriy: <b>{sch.hour:02d}:{sch.minute:02d}</b>",
+        reply_markup=wizard_cancel(),
+    )
+    await cb.answer()
+
+
+@router.message(EditScheduleStates.waiting_for_time)
+async def m_sched_edit_time(message: Message, state: FSMContext, scheduler: WorkoutScheduler) -> None:
+    if not is_owner_message(message):
+        return
+    text = (message.text or "").strip()
+    try:
+        hh_str, mm_str = text.split(":")
+        hour = int(hh_str)
+        minute = int(mm_str)
+        if not (0 <= hour <= 23 and 0 <= minute <= 59):
+            raise ValueError
+    except (ValueError, AttributeError):
+        await message.answer("Format noto'g'ri. <b>HH:MM</b> yuboring (mas. 09:00):")
+        return
+    data = await state.get_data()
+    schedule_id = int(data.get("schedule_id", 0))
+    async with AsyncSessionLocal() as session:
+        sch = await update_workout_schedule(session, schedule_id=schedule_id, hour=hour, minute=minute)
+        if sch is None:
+            await state.clear()
+            await message.answer("Jadval topilmadi.")
+            return
+        await session.commit()
+        workout = await get_workout(session, sch.workout_id)
+        # Re-register with scheduler so APScheduler picks up new time
+        scheduler.remove_schedule(sch.id)
+        if sch.active:
+            scheduler.add_schedule(sch)
+    await state.clear()
+    await message.answer(
+        _format_schedule_text(workout.name if workout else "—", sch),
+        reply_markup=schedule_detail(sch.id, sch.workout_id, sch.active),
+    )
+
+
+@router.callback_query(F.data.startswith("wo:schededto:"))
+async def cb_sched_edit_timeout(cb: CallbackQuery, state: FSMContext) -> None:
+    if not is_owner_callback(cb):
+        return
+    msg = accessible(cb)
+    if msg is None:
+        return
+    schedule_id = int((cb.data or "").split(":")[-1])
+    async with AsyncSessionLocal() as session:
+        sch = await get_workout_schedule(session, schedule_id)
+        if sch is None:
+            await cb.answer("Topilmadi", show_alert=True)
+            return
+    await state.set_state(EditScheduleStates.waiting_for_timeout)
+    await state.update_data(schedule_id=schedule_id)
+    await msg.answer(
+        f"⏱ Yangi javob kutish vaqti (1-240 daq) yuboring.\n" f"Joriy: <b>{sch.ack_timeout_min}</b> daq",
+        reply_markup=wizard_cancel(),
+    )
+    await cb.answer()
+
+
+@router.message(EditScheduleStates.waiting_for_timeout)
+async def m_sched_edit_timeout(message: Message, state: FSMContext, scheduler: WorkoutScheduler) -> None:
+    if not is_owner_message(message):
+        return
+    text = (message.text or "").strip()
+    try:
+        n = int(text)
+        if not (1 <= n <= 240):
+            raise ValueError
+    except ValueError:
+        await message.answer("Raqam 1-240 oraliqda bo'lsin. Qayta yuboring:")
+        return
+    data = await state.get_data()
+    schedule_id = int(data.get("schedule_id", 0))
+    async with AsyncSessionLocal() as session:
+        sch = await update_workout_schedule(session, schedule_id=schedule_id, ack_timeout_min=n)
+        if sch is None:
+            await state.clear()
+            await message.answer("Jadval topilmadi.")
+            return
+        await session.commit()
+        workout = await get_workout(session, sch.workout_id)
+    await state.clear()
+    await message.answer(
+        _format_schedule_text(workout.name if workout else "—", sch),
+        reply_markup=schedule_detail(sch.id, sch.workout_id, sch.active),
+    )
+
+
+@router.callback_query(F.data.startswith("wo:schededdays:"))
+async def cb_sched_edit_days(cb: CallbackQuery, state: FSMContext) -> None:
+    if not is_owner_callback(cb):
+        return
+    msg = accessible(cb)
+    if msg is None:
+        return
+    schedule_id = int((cb.data or "").split(":")[-1])
+    async with AsyncSessionLocal() as session:
+        sch = await get_workout_schedule(session, schedule_id)
+        if sch is None:
+            await cb.answer("Topilmadi", show_alert=True)
+            return
+    await state.set_state(EditScheduleStates.waiting_for_days)
+    await state.update_data(schedule_id=schedule_id, edit_days_mask=sch.days_mask)
+    await msg.edit_text(
+        "Yangi kunlarni tanlang (mavjud belgilangan):",
+        reply_markup=days_picker(sch.days_mask),
+    )
+    await cb.answer()
+
+
+@router.callback_query(F.data.startswith("wo:dtoggle:"), EditScheduleStates.waiting_for_days)
+async def cb_sched_edit_days_toggle(cb: CallbackQuery, state: FSMContext) -> None:
+    if not is_owner_callback(cb):
+        return
+    msg = accessible(cb)
+    if msg is None:
+        return
+    idx = int((cb.data or "").split(":")[-1])
+    if not (0 <= idx <= 6):
+        await cb.answer()
+        return
+    data = await state.get_data()
+    mask = int(data.get("edit_days_mask", 0)) ^ (1 << idx)
+    await state.update_data(edit_days_mask=mask)
+    await msg.edit_reply_markup(reply_markup=days_picker(mask))
+    await cb.answer()
+
+
+@router.callback_query(F.data == "wo:dconfirm", EditScheduleStates.waiting_for_days)
+async def cb_sched_edit_days_confirm(
+    cb: CallbackQuery, state: FSMContext, scheduler: WorkoutScheduler
+) -> None:
+    if not is_owner_callback(cb):
+        return
+    msg = accessible(cb)
+    if msg is None:
+        return
+    data = await state.get_data()
+    schedule_id = int(data.get("schedule_id", 0))
+    mask = int(data.get("edit_days_mask", 0))
+    if mask == 0:
+        await cb.answer("Hech bo'lmasa 1 ta kun tanlang", show_alert=True)
+        return
+    async with AsyncSessionLocal() as session:
+        sch = await update_workout_schedule(session, schedule_id=schedule_id, days_mask=mask)
+        if sch is None:
+            await state.clear()
+            await cb.answer("Topilmadi", show_alert=True)
+            return
+        await session.commit()
+        workout = await get_workout(session, sch.workout_id)
+        scheduler.remove_schedule(sch.id)
+        if sch.active:
+            scheduler.add_schedule(sch)
+    await state.clear()
+    await msg.edit_text(
+        _format_schedule_text(workout.name if workout else "—", sch),
+        reply_markup=schedule_detail(sch.id, sch.workout_id, sch.active),
+    )
+    await cb.answer("Yangilandi")
 
 
 # ---------- Reminder ack ----------

@@ -360,6 +360,30 @@ async def toggle_workout_schedule(session: AsyncSession, *, schedule_id: int) ->
     return row
 
 
+async def update_workout_schedule(
+    session: AsyncSession,
+    *,
+    schedule_id: int,
+    hour: int | None = None,
+    minute: int | None = None,
+    ack_timeout_min: int | None = None,
+    days_mask: int | None = None,
+) -> WorkoutSchedule | None:
+    row = await session.get(WorkoutSchedule, schedule_id)
+    if row is None:
+        return None
+    if hour is not None:
+        row.hour = hour
+    if minute is not None:
+        row.minute = minute
+    if ack_timeout_min is not None:
+        row.ack_timeout_min = ack_timeout_min
+    if days_mask is not None:
+        row.days_mask = days_mask
+    await session.flush()
+    return row
+
+
 # ---------- WorkoutReminder ----------
 
 
